@@ -2,13 +2,14 @@ use crate::{
 	dir, init, manifest::Manifest, net::{interpret_url, require_task}, telemetry::{self, TELEMETRY}, util
 };
 use evscode::{error::ResultExt, quick_pick, QuickPick, Webview, E, R};
+use futures::executor::block_on;
 use std::time::Instant;
 use unijudge::{Backend, Resource, Statement};
 
 pub fn activate() -> R<()> {
 	let _status = crate::STATUS.push("Launching");
 	*telemetry::START_TIME.lock().unwrap() = Some(Instant::now());
-	evscode::runtime::spawn(crate::newsletter::check);
+	evscode::runtime::spawn_async(crate::newsletter::check());
 	layout_setup()?;
 	init::contest::check_for_manifest()?;
 	Ok(())
@@ -22,12 +23,12 @@ pub fn deactivate() -> R<()> {
 pub fn layout_setup() -> R<()> {
 	let _status = crate::STATUS.push("Opening files");
 	if let (Ok(_), Ok(manifest), Ok(solution)) = (evscode::workspace_root(), Manifest::load(), dir::solution()) {
-		evscode::open_editor(&solution).cursor(util::find_cursor_place(&solution)).view_column(1).open().wait();
+		block_on(evscode::open_editor(&solution).cursor(util::find_cursor_place(&solution)).view_column(1).open());
 		if manifest.statement.is_some() {
 			statement()?;
 		}
 		// refocus the cursor, because apparently preserve_focus is useless
-		evscode::open_editor(&solution).cursor(util::find_cursor_place(&solution)).view_column(1).open().wait();
+		block_on(evscode::open_editor(&solution).cursor(util::find_cursor_place(&solution)).view_column(1).open());
 	}
 	Ok(())
 }
@@ -95,11 +96,10 @@ fn nearby() -> R<()> {
 		})
 		.collect::<Vec<_>>();
 	nearby.sort_by_key(|nearby| nearby.1.clone());
-	let select = QuickPick::new()
-		.items(nearby.into_iter().map(|nearby| quick_pick::Item::new(nearby.0.to_str().unwrap(), nearby.1)))
-		.build()
-		.wait()
-		.ok_or_else(E::cancel)?;
+	let select = block_on(
+		QuickPick::new().items(nearby.into_iter().map(|nearby| quick_pick::Item::new(nearby.0.to_str().unwrap().to_owned(), nearby.1))).show(),
+	)
+	.ok_or_else(E::cancel)?;
 	evscode::open_folder(select, false);
 	Ok(())
 }
@@ -108,7 +108,7 @@ fn nearby() -> R<()> {
 fn web_task() -> R<()> {
 	TELEMETRY.launch_web_task.spark();
 	let manifest = Manifest::load()?;
-	evscode::open_external(manifest.req_task_url()?).wait()?;
+	block_on(evscode::open_external(manifest.req_task_url()?))?;
 	Ok(())
 }
 
@@ -119,6 +119,6 @@ fn web_contest() -> R<()> {
 	let (url, backend) = interpret_url(manifest.req_task_url()?)?;
 	let Resource::Task(task) = require_task(url)?.resource;
 	let url = backend.backend.contest_url(&backend.backend.task_contest(&task).wrap("task is not attached to any contest")?);
-	evscode::open_external(url).wait()?;
+	block_on(evscode::open_external(&url))?;
 	Ok(())
 }

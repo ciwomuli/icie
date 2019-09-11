@@ -1,4 +1,5 @@
 use evscode::{error::ResultExt, Position, E, R};
+use futures::executor::block_on;
 use std::{
 	path::{Path, PathBuf}, time::Duration
 };
@@ -52,7 +53,7 @@ pub fn fmt_verb(verb: &'static str, path: impl MaybePath) -> String {
 }
 
 pub fn active_tab() -> evscode::R<Option<PathBuf>> {
-	let source = evscode::active_editor_file().wait().ok_or_else(E::cancel)?;
+	let source = block_on(evscode::active_editor_file()).ok_or_else(E::cancel)?;
 	Ok(if source != crate::dir::solution()? { Some(source) } else { None })
 }
 

@@ -45,6 +45,7 @@
 pub mod config;
 pub mod error;
 pub mod future;
+pub(crate) mod future2;
 pub mod goodies;
 #[doc(hidden)]
 pub mod internal;

@@ -7,9 +7,10 @@ edition = "2018"
 [dependencies]
 arc-swap = "0.4"
 backtrace = "0.3"
+futures-preview = "0.3.0-alpha.18"
 json = "0.12"
 lazy_static = "1.0"
-log = "0.4"
+log = { version = "0.4", features = ["std"] }
 evscode-codegen = { path = "../evscode-codegen" }
 radix_trie = "0.1.4"
 shellexpand = "1.0"

@@ -2,6 +2,7 @@ use crate::{
 	interpolation::Interpolation, net::{self, BackendMeta}, telemetry::TELEMETRY, util::{self, fs_create_dir_all}
 };
 use evscode::{quick_pick, QuickPick, E, R};
+use futures::executor::block_on;
 use std::{
 	path::{Path, PathBuf}, sync::Arc
 };
@@ -23,18 +24,19 @@ fn scan() -> R<()> {
 	TELEMETRY.init_scan.spark();
 	let mut contests = scan::fetch_contests();
 	contests.sort_by_key(|contest| contest.1.start);
-	let pick = QuickPick::new()
-		.items(contests.iter().enumerate().map(|(index, (sess, contest, _))| {
-			let site_prefix = sess.backend.contest_site_prefix();
-			let label = if contest.title.starts_with(site_prefix) { contest.title.clone() } else { format!("{} {}", site_prefix, contest.title) };
-			let start = contest.start.with_timezone(&Local).to_rfc2822();
-			quick_pick::Item::new(index.to_string(), label).description(start)
-		}))
-		.match_on_description()
-		.ignore_focus_out()
-		.build()
-		.wait()
-		.ok_or_else(E::cancel)?;
+	let pick = block_on(
+		QuickPick::new()
+			.items(contests.iter().enumerate().map(|(index, (sess, contest, _))| {
+				let site_prefix = sess.backend.contest_site_prefix();
+				let label = if contest.title.starts_with(site_prefix) { contest.title.clone() } else { format!("{} {}", site_prefix, contest.title) };
+				let start = contest.start.with_timezone(&Local).to_rfc2822();
+				quick_pick::Item::new(index.to_string(), label).description(start)
+			}))
+			.match_on_description()
+			.ignore_focus_out()
+			.show(),
+	)
+	.ok_or_else(E::cancel)?;
 	let (sess, contest, backend) = &contests[pick.parse::<usize>().unwrap()];
 	backend.counter.spark();
 	TELEMETRY.init_scan_ok.spark();
@@ -51,7 +53,7 @@ fn url() -> R<()> {
 		InitCommand::Task(url) => {
 			TELEMETRY.init_url_task.spark();
 			let meta = url.map(|(url, backend)| fetch_task_details(url, backend)).transpose()?;
-			let root = names::design_task_name(&*crate::dir::PROJECT_DIRECTORY.get(), meta.as_ref())?;
+			let root = block_on(names::design_task_name(&*crate::dir::PROJECT_DIRECTORY.get(), meta.as_ref()))?;
 			let dir = util::TransactionDir::new(&root)?;
 			init_task(&root, raw_url, meta)?;
 			dir.commit();
@@ -83,14 +85,15 @@ fn url_existing() -> R<()> {
 }
 
 fn ask_url() -> R<Option<String>> {
-	Ok(evscode::InputBox::new()
-		.prompt("Enter task/contest URL or leave empty")
-		.placeholder("https://codeforces.com/contest/.../problem/...")
-		.ignore_focus_out()
-		.build()
-		.wait()
-		.map(|url| if url.trim().is_empty() { None } else { Some(url) })
-		.ok_or_else(E::cancel)?)
+	Ok(block_on(
+		evscode::InputBox::new()
+			.prompt("Enter task/contest URL or leave empty")
+			.placeholder("https://codeforces.com/contest/.../problem/...")
+			.ignore_focus_out()
+			.show(),
+	)
+	.map(|url| if url.trim().is_empty() { None } else { Some(url) })
+	.ok_or_else(E::cancel)?)
 }
 
 #[allow(unused)]
@@ -133,7 +136,7 @@ fn init_task(root: &Path, url: Option<String>, meta: Option<TaskDetails>) -> R<(
 }
 
 pub fn help_init() -> R<()> {
-	evscode::open_external("https://github.com/pustaczek/icie/blob/master/README.md#quick-start").wait()?;
+	block_on(evscode::open_external("https://github.com/pustaczek/icie/blob/master/README.md#quick-start"))?;
 	Ok(())
 }
 
@@ -177,7 +180,7 @@ enum PathDialog {
 }
 
 impl PathDialog {
-	fn query(&self, directory: &Path, codename: &str) -> R<PathBuf> {
+	async fn query(&self, directory: &Path, codename: &str) -> R<PathBuf> {
 		let basic = format!("{}/{}", directory.to_str().unwrap(), codename);
 		match self {
 			PathDialog::None => Ok(PathBuf::from(basic)),
@@ -187,11 +190,11 @@ impl PathDialog {
 					.prompt("New project directory")
 					.value(&basic)
 					.value_selection(basic.len() - codename.len(), basic.len())
-					.build()
-					.wait()
+					.show()
+					.await
 					.ok_or_else(E::cancel)?,
 			)),
-			PathDialog::SystemDialog => Ok(evscode::OpenDialog::new().directory().action_label("Init").build().wait().ok_or_else(E::cancel)?),
+			PathDialog::SystemDialog => Ok(evscode::OpenDialog::new().directory().action_label("Init").show().await.ok_or_else(E::cancel)?),
 		}
 	}
 }

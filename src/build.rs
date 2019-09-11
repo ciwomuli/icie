@@ -2,6 +2,7 @@ use crate::{
 	ci::{self, exec::Executable}, dir, telemetry::TELEMETRY, util, STATUS
 };
 use evscode::{error::ResultExt, Position, R};
+use futures::executor::block_on;
 use std::{
 	path::{Path, PathBuf}, time::SystemTime
 };
@@ -55,29 +56,27 @@ fn manual() -> evscode::R<()> {
 		.collect::<walkdir::Result<Vec<_>>>()
 		.wrap("failed to scan tests directory")?;
 	let source = PathBuf::from(
-		evscode::QuickPick::new()
-			.items(sources.into_iter().map(|entry| {
-				let path = entry.path();
-				let text = path.strip_prefix(&root).unwrap_or(path).to_str().unwrap();
-				evscode::quick_pick::Item::new(path.to_str().unwrap(), text)
-			}))
-			.build()
-			.spawn()
-			.wait()
-			.ok_or_else(evscode::E::cancel)?,
-	);
-	let codegen = &ci::cpp::CODEGEN_LIST[evscode::QuickPick::new()
-		.ignore_focus_out()
-		.match_on_all()
-		.items(
-			ci::cpp::CODEGEN_LIST
-				.iter()
-				.enumerate()
-				.map(|(i, codegen)| evscode::quick_pick::Item::new(i.to_string(), format!("{:?}", codegen)).description(codegen.flags().join(" "))),
+		block_on(
+			evscode::QuickPick::new()
+				.items(sources.into_iter().map(|entry| {
+					let path = entry.path();
+					let text = path.strip_prefix(&root).unwrap_or(path).to_str().unwrap();
+					evscode::quick_pick::Item::new(path.to_str().unwrap().to_owned(), text.to_owned())
+				}))
+				.show(),
 		)
-		.build()
-		.spawn()
-		.wait()
+		.ok_or_else(evscode::E::cancel)?,
+	);
+	let codegen =
+		&ci::cpp::CODEGEN_LIST[block_on(
+			evscode::QuickPick::new()
+				.ignore_focus_out()
+				.match_on_all()
+				.items(ci::cpp::CODEGEN_LIST.iter().enumerate().map(|(i, codegen)| {
+					evscode::quick_pick::Item::new(i.to_string(), format!("{:?}", codegen)).description(codegen.flags().join(" "))
+				}))
+				.show(),
+		)
 		.ok_or_else(evscode::E::cancel)?
 		.parse::<usize>()
 		.unwrap()];
@@ -95,7 +94,7 @@ pub fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, force_reb
 		let pretty_source = source.strip_prefix(evscode::workspace_root()?).wrap("tried to build source outside of project directory")?;
 		return Err(evscode::E::error(format!("source `{}` does not exist", pretty_source.display())));
 	}
-	evscode::save_all().wait();
+	block_on(evscode::save_all())?;
 	let out = source.with_extension(&*EXECUTABLE_EXTENSION.get());
 	if !force_rebuild && should_cache(&source, &out)? {
 		return Ok(Executable::new(out));
@@ -112,7 +111,7 @@ pub fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, force_reb
 		if let Some(error) = status.errors.first() {
 			if let Some(location) = &error.location {
 				if *AUTO_MOVE_TO_ERROR.get() {
-					evscode::open_editor(&location.path).cursor(Position { line: location.line - 1, column: location.column - 1 }).open().spawn();
+					block_on(evscode::open_editor(&location.path).cursor(Position { line: location.line - 1, column: location.column - 1 }).open());
 				}
 			}
 			Err(evscode::E::error(error.message.clone()).context("compilation error").workflow_error())
@@ -122,7 +121,7 @@ pub fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, force_reb
 	} else {
 		if !status.warnings.is_empty() {
 			let warnings = status.warnings;
-			evscode::runtime::spawn(move || show_warnings(warnings));
+			evscode::runtime::spawn_async(show_warnings(warnings));
 		}
 		Ok(status.executable)
 	}
@@ -146,25 +145,20 @@ pub fn exec_path(source: impl util::MaybePath) -> evscode::R<PathBuf> {
 	Ok(source.with_extension(&*EXECUTABLE_EXTENSION.get()))
 }
 
-fn show_warnings(warnings: Vec<ci::cpp::Message>) -> R<()> {
+async fn show_warnings(warnings: Vec<ci::cpp::Message>) -> R<()> {
 	if !*AUTO_MOVE_TO_WARNING.get() {
-		let msg = evscode::Message::new(format!("{} compilation warning{}", warnings.len(), if warnings.len() == 1 { "" } else { "s" }))
-			.warning()
-			.item("show", "Show", false)
-			.build();
-		if msg.wait().is_none() {
+		let message = format!("{} compilation warning{}", warnings.len(), if warnings.len() == 1 { "" } else { "s" });
+		if evscode::Message::new(&message).warning().item("show".to_owned(), "Show", false).show().await.is_none() {
 			return Ok(());
 		}
 	}
 	for (i, warning) in warnings.iter().enumerate() {
 		if let Some(location) = &warning.location {
-			evscode::open_editor(&location.path).cursor(Position { line: location.line - 1, column: location.column - 1 }).open().spawn();
+			evscode::open_editor(&location.path).cursor(Position { line: location.line - 1, column: location.column - 1 }).open().await;
 		}
-		let mut msg = evscode::Message::new(&warning.message).warning();
-		if i + 1 != warnings.len() {
-			msg = msg.item("next", "Next", false);
-		}
-		if msg.build().wait().is_none() {
+		let msg = evscode::Message::new(&warning.message).warning();
+		let choice = if i + 1 != warnings.len() { msg.item("next".to_owned(), "Next", false).show().await } else { msg.show().await };
+		if choice.is_none() {
 			break;
 		}
 	}

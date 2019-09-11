@@ -2,6 +2,7 @@ use crate::{
 	dir, init::help_init, net::{self, require_task}, telemetry::TELEMETRY, test, util::{self, plural}
 };
 use evscode::{E, R};
+use futures::executor::block_on;
 use std::time::Duration;
 use unijudge::{
 	boxed::{BoxedContest, BoxedTask}, Backend, RejectionCause, Resource
@@ -93,7 +94,7 @@ fn track(sess: crate::net::Session, url: &unijudge::boxed::BoxedTask, id: String
 		std::thread::sleep(TRACK_DELAY);
 	};
 	progress.end();
-	evscode::Message::new(fmt_verdict(&verdict)).build().spawn();
+	block_on(evscode::Message::new(&fmt_verdict(&verdict)).show());
 	Ok(())
 }
 

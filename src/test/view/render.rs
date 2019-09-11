@@ -2,6 +2,7 @@ use crate::{
 	ci::test::Verdict, test::{view::SKILL_ACTIONS, TestRun}, util
 };
 use evscode::R;
+use futures::executor::block_on;
 use std::cmp::max;
 
 #[derive(Debug, PartialEq, Eq, evscode::Configurable)]
@@ -207,7 +208,8 @@ fn render_cell_raw(
 		.filter_map(|(active, action)| if *active { Some(action) } else { None })
 		.map(|action| format!("<div class=\"material-icons action\" onclick=\"{}\" title=\"{}\">{}</div>", action.onclick, action.hint, action.icon))
 		.collect::<Vec<_>>();
-	let actions = format!("<div class=\"actions {}\">{}</div>", if !SKILL_ACTIONS.is_proficient() { "tutorialize" } else { "" }, actions.join("\n"));
+	let actions =
+		format!("<div class=\"actions {}\">{}</div>", if !block_on(SKILL_ACTIONS.is_proficient()) { "tutorialize" } else { "" }, actions.join("\n"));
 	let note = note.map_or(String::new(), |note| format!("<div class=\"note\">{}</div>", html_escape(note)));
 	let lines = (stderr.as_ref().map_or(0, |stderr| lines(stderr)) + lines(stdout)) as i64;
 	let stderr = stderr.as_ref().map_or(String::new(), |stderr| format!("<div class=\"stderr\">{}</div>", html_escape_spaced(stderr.trim())));

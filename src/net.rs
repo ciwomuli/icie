@@ -131,7 +131,7 @@ impl<T: Backend+?Sized> GenericSession<T> {
 
 	fn maybe_error_show(&self, e: unijudge::Error) {
 		if let unijudge::Error::WrongCredentials = e {
-			evscode::Message::new("Wrong username or password").error().build().spawn();
+			evscode::Message::new("Wrong username or password").error().show_detach();
 		}
 	}
 

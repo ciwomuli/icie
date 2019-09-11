@@ -1,15 +1,11 @@
 use crate::{telemetry::TELEMETRY, util::is_installed};
 use evscode::{E, R};
+use futures::executor::block_on;
 
 pub fn get_force_ask(site: &str) -> R<(String, String)> {
 	TELEMETRY.auth_ask.spark();
-	let username = evscode::InputBox::new().prompt(format!("Username at {}", site)).ignore_focus_out().build().wait().ok_or_else(E::cancel)?;
-	let password = evscode::InputBox::new()
-		.prompt(format!("Password for {} at {}", username, site))
-		.password()
-		.ignore_focus_out()
-		.build()
-		.wait()
+	let username = block_on(evscode::InputBox::new().prompt(&format!("Username at {}", site)).ignore_focus_out().show()).ok_or_else(E::cancel)?;
+	let password = block_on(evscode::InputBox::new().prompt(&format!("Password for {} at {}", username, site)).password().ignore_focus_out().show())
 		.ok_or_else(E::cancel)?;
 	let kr = Keyring::new("credentials", site);
 	if !kr.set(
@@ -53,13 +49,14 @@ pub fn has_any_saved(site: &str) -> bool {
 #[evscode::command(title = "ICIE Password reset")]
 fn reset() -> R<()> {
 	TELEMETRY.auth_reset.spark();
-	let url = evscode::InputBox::new()
-		.prompt("Enter any contest/task URL from the site for which you want to reset the password")
-		.placeholder("https://codeforces.com/contest/.../problem/...")
-		.ignore_focus_out()
-		.build()
-		.wait()
-		.ok_or_else(E::cancel)?;
+	let url = block_on(
+		evscode::InputBox::new()
+			.prompt("Enter any contest/task URL from the site for which you want to reset the password")
+			.placeholder("https://codeforces.com/contest/.../problem/...")
+			.ignore_focus_out()
+			.show(),
+	)
+	.ok_or_else(E::cancel)?;
 	let site = crate::net::interpret_url(&url)?.0.site;
 	Keyring::new("credentials", &site).delete();
 	Keyring::new("session", &site).delete();
@@ -67,7 +64,7 @@ fn reset() -> R<()> {
 }
 
 fn help_fix_kwallet() -> R<()> {
-	evscode::open_external("https://github.com/pustaczek/icie/issues/14#issuecomment-516982482").wait()
+	block_on(evscode::open_external("https://github.com/pustaczek/icie/issues/14#issuecomment-516982482"))
 }
 
 struct Keyring {

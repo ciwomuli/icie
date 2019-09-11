@@ -4,6 +4,7 @@ use crate::{
 	}, net::{interpret_url, require_contest, Session}, telemetry::TELEMETRY, util::{fmt_time_left, fs_read_to_string, fs_write, plural, TransactionDir}
 };
 use evscode::{error::ResultExt, E, R};
+use futures::executor::block_on;
 use serde::{Deserialize, Serialize};
 use std::{
 	fs, path::Path, sync::Arc, thread::sleep, time::{Duration, SystemTime}
@@ -17,14 +18,14 @@ use unijudge::{
 /// Post-setup steps will either be done from this function or the extension activation function.
 pub fn sprint(sess: Arc<Session>, contest: &BoxedContest, contest_title: Option<&str>) -> R<()> {
 	let _status = crate::STATUS.push("Initializing");
-	let root_dir = design_contest_name(
-		&sess.backend.contest_id(contest),
-		&match contest_title {
+	let root_dir = block_on(design_contest_name(
+		sess.backend.contest_id(contest),
+		match contest_title {
 			Some(title) => title.to_owned(),
 			None => sess.run(|backend, sess| backend.contest_title(sess, contest))?,
 		},
 		sess.backend.name_short(),
-	)?;
+	))?;
 	let root_dir = TransactionDir::new(&root_dir)?;
 	let url_raw = sess.backend.contest_url(contest);
 	let (url, _) = interpret_url(&url_raw)?;
@@ -35,7 +36,7 @@ pub fn sprint(sess: Arc<Session>, contest: &BoxedContest, contest_title: Option<
 	let task0 = tasks.get(0).wrap("could not find any tasks in contest")?;
 	let task0_details = fetch_task(task0, &format!("1/{}", tasks.len()), &sess)?;
 	let task0_url = sess.run(|backend, sess| backend.task_url(sess, task0))?;
-	let task0_path = design_task_name(root_dir.path(), Some(&task0_details))?;
+	let task0_path = block_on(design_task_name(root_dir.path(), Some(&task0_details)))?;
 	init_task(&task0_path, Some(task0_url), Some(task0_details))?;
 	let manifest = Manifest { contest_url: url_raw };
 	fs_write(task0_path.join(".icie-contest"), serde_json::to_string(&manifest).wrap("serialization of contest manifest failed")?)?;
@@ -69,7 +70,7 @@ fn inner_sprint(manifest: &Path) -> R<()> {
 	for (i, task) in tasks.iter().enumerate() {
 		if i > 0 {
 			let details = fetch_task(task, &format!("{}/{}", i + 1, tasks.len()), &sess)?;
-			let root = design_task_name(contest_dir, Some(&details))?;
+			let root = block_on(design_task_name(contest_dir, Some(&details)))?;
 			init_task(&root, Some(sess.run(|_, _| sess.backend.task_url(&sess.session, &task))?), Some(details))?;
 		}
 	}
@@ -147,14 +148,15 @@ fn spawn_login_suggestion(site: &str, sess: &Arc<Session>) {
 		let sess = sess.clone();
 		move || {
 			if !auth::has_any_saved(&site) {
-				let dec = evscode::Message::new(format!("You are not logged in to {}, maybe do it now to save time when submitting?", site))
-					.item("log-in", "Log in", false)
-					.build()
-					.wait();
+				let dec = block_on(
+					evscode::Message::new(&format!("You are not logged in to {}, maybe do it now to save time when submitting?", site))
+						.item("log-in".to_owned(), "Log in", false)
+						.show(),
+				);
 				if let Some("log-in") = dec.as_ref().map(String::as_str) {
 					let _status = crate::STATUS.push("Logging in");
 					sess.force_login()?;
-					evscode::Message::new("Logged in successfully").build().spawn();
+					block_on(evscode::Message::new("Logged in successfully").show());
 				}
 			}
 			Ok(())

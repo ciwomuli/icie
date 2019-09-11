@@ -6,6 +6,7 @@ use crate::{
 use evscode::{
 	error::ResultExt, goodies::{webview_resultmap::Computation, WebviewHandle}, Webview, WebviewResultmap, E, R
 };
+use futures::executor::block_on;
 use std::{
 	fs, path::{Path, PathBuf}
 };
@@ -93,10 +94,10 @@ impl Computation for TestViewLogic {
 					}),
 					Some("edit") => {
 						TELEMETRY.test_edit.spark();
-						evscode::open_editor(Path::new(note["path"].as_str().unwrap())).open().spawn();
+						block_on(evscode::open_editor(Path::new(note["path"].as_str().unwrap())).open());
 					},
 					Some("action_notice") => evscode::runtime::spawn(|| {
-						SKILL_ACTIONS.add_use();
+						block_on(SKILL_ACTIONS.add_use());
 						Ok(())
 					}),
 					Some("eval_req") => {
