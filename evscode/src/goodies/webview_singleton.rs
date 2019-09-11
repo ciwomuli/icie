@@ -1,12 +1,14 @@
 //! Container for a singleton webview used by many threads.
 
 use crate::{goodies::WebviewHandle, Webview, R};
-use std::sync::{Arc, Mutex};
+use std::{
+	future::Future, pin::Pin, sync::{Arc, Mutex}
+};
 
 /// Function that creates the webview.
 pub type Creator = fn() -> R<Webview>;
 /// Worker function that handles the messages received from the webview.
-pub type Manager = fn(WebviewHandle) -> R<()>;
+pub type Manager = fn(WebviewHandle) -> Pin<Box<dyn Future<Output=R<()>>+Send>>;
 
 /// State of the webview.
 pub struct WebviewSingleton {
@@ -30,12 +32,12 @@ impl WebviewSingleton {
 			let view = (self.create)()?;
 			let handle = Arc::new(Mutex::new(view));
 			let handle2 = handle.clone();
-			crate::runtime::spawn(move || {
-				(self.manage)(handle2)?;
+			crate::runtime::spawn_async((async move || {
+				(self.manage)(handle2).await?;
 				let mut container_lock = self.container.lock().unwrap();
 				*container_lock = None;
 				Ok(())
-			});
+			})());
 			*container_lock = Some(handle.clone());
 			handle
 		};

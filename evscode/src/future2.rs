@@ -1,8 +1,11 @@
-use crate::internal::executor::{ASYNC_ID_FACTORY, ASYNC_OPS2};
+use crate::internal::executor::{ASYNC_ID_FACTORY, ASYNC_OPS2, ASYNC_STREAMS};
+use futures::Stream;
 use json::JsonValue;
 use std::{
 	collections::hash_map::Entry, future::Future, pin::Pin, task::{Context, Poll}
 };
+
+pub type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output=T>+Send+'a>>;
 
 pub struct Pong {
 	id: u64,
@@ -13,6 +16,22 @@ impl Pong {
 		let id = ASYNC_ID_FACTORY.generate();
 		ASYNC_OPS2.lock().unwrap().insert(id, (None, None));
 		Pong { id }
+	}
+
+	pub fn aid(&self) -> u64 {
+		self.id
+	}
+}
+
+pub struct PongStream {
+	id: u64,
+}
+
+impl PongStream {
+	pub fn new() -> PongStream {
+		let id = ASYNC_ID_FACTORY.generate();
+		ASYNC_OPS2.lock().unwrap().insert(id, (None, None));
+		PongStream { id }
 	}
 
 	pub fn aid(&self) -> u64 {
@@ -38,8 +57,32 @@ impl Future for Pong {
 	}
 }
 
+impl Stream for PongStream {
+	type Item = JsonValue;
+
+	fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+		match ASYNC_STREAMS.lock().unwrap().entry(self.id) {
+			Entry::Occupied(mut e) => match e.get_mut() {
+				(que, _) if !que.is_empty() => Poll::Ready(Some(que.pop_front().unwrap())),
+				(_, Some(_)) => Poll::Pending,
+				(_, waker @ None) => {
+					*waker = Some(cx.waker().clone());
+					Poll::Pending
+				},
+			},
+			Entry::Vacant(_) => unreachable!(),
+		}
+	}
+}
+
 impl Drop for Pong {
 	fn drop(&mut self) {
 		ASYNC_OPS2.lock().unwrap().remove(&self.id);
+	}
+}
+
+impl Drop for PongStream {
+	fn drop(&mut self) {
+		ASYNC_STREAMS.lock().unwrap().remove(&self.id);
 	}
 }

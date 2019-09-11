@@ -1,4 +1,5 @@
-#![feature(bind_by_move_pattern_guards, const_fn, exhaustive_patterns, never_type, proc_macro_hygiene, specialization, todo_macro, try_blocks)]
+#![feature(async_closure, const_fn, exhaustive_patterns, never_type, proc_macro_hygiene, specialization, todo_macro, try_blocks)]
+#![allow(clippy::extra_unused_lifetimes, clippy::redundant_closure_call, clippy::unit_arg)]
 
 mod auth;
 mod build;
@@ -34,8 +35,8 @@ evscode::plugin! {
 	categories: &["Other"],
 	license: "GPL-3.0-only",
 	repository: "https://github.com/pustaczek/icie",
-	on_activate: Some(launch::activate),
-	on_deactivate: Some(launch::deactivate),
+	on_activate: Some(Box::pin(launch::activate())),
+	on_deactivate: Some(Box::pin(launch::deactivate())),
 	extra_activations: &[
 		evscode::meta::Activation::WorkspaceContains { selector: ".icie" },
 		evscode::meta::Activation::WorkspaceContains { selector: ".icie-contest" },

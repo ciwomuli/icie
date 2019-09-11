@@ -28,7 +28,7 @@ impl Run {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Executable {
 	pub path: PathBuf,
 }

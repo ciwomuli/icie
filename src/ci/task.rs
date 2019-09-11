@@ -9,7 +9,7 @@ pub trait Checker: fmt::Debug {
 
 #[derive(Debug)]
 pub struct Task {
-	pub checker: Box<dyn Checker+Send>,
+	pub checker: Box<dyn Checker+Send+Sync>,
 	pub environment: Environment,
 }
 

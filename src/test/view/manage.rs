@@ -4,11 +4,11 @@ use crate::{
 	}, util
 };
 use evscode::{
-	error::ResultExt, goodies::{webview_resultmap::Computation, WebviewHandle}, Webview, WebviewResultmap, E, R
+	error::{cancel_on, ResultExt}, goodies::{webview_resultmap::Computation, WebviewHandle}, Webview, WebviewResultmap, E, R
 };
-use futures::executor::block_on;
+use futures::{executor::block_on, StreamExt};
 use std::{
-	fs, path::{Path, PathBuf}
+	fs, future::Future, path::{Path, PathBuf}, pin::Pin
 };
 
 lazy_static::lazy_static! {
@@ -28,7 +28,7 @@ impl Computation for TestViewLogic {
 	type V = Report;
 
 	fn compute(&self, source: &Option<PathBuf>) -> R<Report> {
-		Ok(Report { runs: test::run(source)? })
+		Ok(Report { runs: block_on(test::run(source))? })
 	}
 
 	fn create_empty_webview(&self, source: &Option<PathBuf>) -> R<Webview> {
@@ -38,7 +38,7 @@ impl Computation for TestViewLogic {
 	}
 
 	fn update(&self, _: &Option<PathBuf>, report: &Report, webview: &Webview) -> R<()> {
-		webview.set_html(render(&report.runs)?);
+		webview.set_html(block_on(render(&report.runs))?);
 		webview.reveal(2, true);
 		if *SCROLL_TO_FIRST_FAILED.get() {
 			webview.post_message(json::object! {
@@ -48,14 +48,16 @@ impl Computation for TestViewLogic {
 		Ok(())
 	}
 
-	fn manage(&self, source: &Option<PathBuf>, _: &Report, webview: WebviewHandle) -> R<Box<dyn FnOnce() -> R<()>+Send+'static>> {
-		let stream = {
+	fn manage(&self, source: &Option<PathBuf>, _: &Report, webview: WebviewHandle) -> R<Pin<Box<dyn Future<Output=R<()>>+Send+'static>>> {
+		let mut stream = {
 			let webview = webview.lock().unwrap();
-			webview.listener().spawn().cancel_on(webview.disposer())
+			cancel_on(webview.listener(), webview.disposer()).boxed()
 		};
 		let source = source.clone();
-		Ok(Box::new(move || {
-			for note in stream {
+		Ok(Box::pin((async move || {
+			let source = source;
+			while let Some(note) = stream.next().await {
+				let note = note?;
 				match note["tag"].as_str() {
 					Some("trigger_rr") => evscode::runtime::spawn({
 						let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
@@ -67,9 +69,9 @@ impl Computation for TestViewLogic {
 						let source = source.clone();
 						move || crate::debug::gdb(in_path, source)
 					}),
-					Some("new_test") => {
-						evscode::runtime::spawn(move || crate::test::add(note["input"].as_str().unwrap(), note["desired"].as_str().unwrap()))
-					},
+					Some("new_test") => evscode::runtime::spawn_async((async move || {
+						crate::test::add(note["input"].as_str().unwrap(), note["desired"].as_str().unwrap()).await
+					})()),
 					Some("set_alt") => evscode::runtime::spawn({
 						TELEMETRY.test_alternative_add.spark();
 						let source = source.clone();
@@ -94,22 +96,19 @@ impl Computation for TestViewLogic {
 					}),
 					Some("edit") => {
 						TELEMETRY.test_edit.spark();
-						block_on(evscode::open_editor(Path::new(note["path"].as_str().unwrap())).open());
+						evscode::open_editor(Path::new(note["path"].as_str().unwrap())).open().await;
 					},
-					Some("action_notice") => evscode::runtime::spawn(|| {
-						block_on(SKILL_ACTIONS.add_use());
-						Ok(())
-					}),
+					Some("action_notice") => SKILL_ACTIONS.add_use().await,
 					Some("eval_req") => {
 						let webview = webview.clone();
-						evscode::runtime::spawn(move || {
+						evscode::runtime::spawn_async((async move || {
 							let _status = crate::STATUS.push("Evaluating");
 							let id = note["id"].as_i64().unwrap();
 							let input = note["input"].as_str().unwrap();
 							if let Ok(brut) = dir::brut() {
 								if brut.exists() {
 									TELEMETRY.test_eval.spark();
-									let brut = build(brut, &Codegen::Release, false)?;
+									let brut = build(brut, &Codegen::Release, false).await?;
 									let run = brut.run(input, &[], &Environment { time_limit: time_limit() })?;
 									if run.success() {
 										add_test(input, &run.stdout)?;
@@ -125,13 +124,13 @@ impl Computation for TestViewLogic {
 								}
 							}
 							Ok(())
-						});
+						})());
 					},
 					_ => return Err(E::error(format!("invalid webview message `{}`", note.dump()))),
 				}
 			}
 			Ok(())
-		}))
+		})()))
 	}
 }
 

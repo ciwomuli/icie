@@ -2,7 +2,6 @@ use crate::{
 	ci::{self, exec::Executable}, dir, telemetry::TELEMETRY, util, STATUS
 };
 use evscode::{error::ResultExt, Position, R};
-use futures::executor::block_on;
 use std::{
 	path::{Path, PathBuf}, time::SystemTime
 };
@@ -40,7 +39,7 @@ static ADDITIONAL_CPP_FLAGS_RELEASE: evscode::Config<String> = "";
 static ADDITIONAL_CPP_FLAGS_PROFILE: evscode::Config<String> = "";
 
 #[evscode::command(title = "ICIE Manual Build", key = "alt+;")]
-fn manual() -> evscode::R<()> {
+async fn manual() -> evscode::R<()> {
 	let _status = crate::STATUS.push("Manually building");
 	TELEMETRY.build_manual.spark();
 	let root = evscode::workspace_root()?;
@@ -56,35 +55,35 @@ fn manual() -> evscode::R<()> {
 		.collect::<walkdir::Result<Vec<_>>>()
 		.wrap("failed to scan tests directory")?;
 	let source = PathBuf::from(
-		block_on(
-			evscode::QuickPick::new()
-				.items(sources.into_iter().map(|entry| {
-					let path = entry.path();
-					let text = path.strip_prefix(&root).unwrap_or(path).to_str().unwrap();
-					evscode::quick_pick::Item::new(path.to_str().unwrap().to_owned(), text.to_owned())
-				}))
-				.show(),
-		)
-		.ok_or_else(evscode::E::cancel)?,
+		evscode::QuickPick::new()
+			.items(sources.into_iter().map(|entry| {
+				let path = entry.path();
+				let text = path.strip_prefix(&root).unwrap_or(path).to_str().unwrap();
+				evscode::quick_pick::Item::new(path.to_str().unwrap().to_owned(), text.to_owned())
+			}))
+			.show()
+			.await
+			.ok_or_else(evscode::E::cancel)?,
 	);
-	let codegen =
-		&ci::cpp::CODEGEN_LIST[block_on(
-			evscode::QuickPick::new()
-				.ignore_focus_out()
-				.match_on_all()
-				.items(ci::cpp::CODEGEN_LIST.iter().enumerate().map(|(i, codegen)| {
-					evscode::quick_pick::Item::new(i.to_string(), format!("{:?}", codegen)).description(codegen.flags().join(" "))
-				}))
-				.show(),
+	let codegen = &ci::cpp::CODEGEN_LIST[evscode::QuickPick::new()
+		.ignore_focus_out()
+		.match_on_all()
+		.items(
+			ci::cpp::CODEGEN_LIST
+				.iter()
+				.enumerate()
+				.map(|(i, codegen)| evscode::quick_pick::Item::new(i.to_string(), format!("{:?}", codegen)).description(codegen.flags().join(" "))),
 		)
+		.show()
+		.await
 		.ok_or_else(evscode::E::cancel)?
 		.parse::<usize>()
 		.unwrap()];
-	build(source, codegen, true)?;
+	build(source, codegen, true).await?;
 	Ok(())
 }
 
-pub fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, force_rebuild: bool) -> R<Executable> {
+pub async fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, force_rebuild: bool) -> R<Executable> {
 	TELEMETRY.build_all.spark();
 	let source = source.as_option_path();
 	let _status = STATUS.push(util::fmt_verb("Building", &source));
@@ -94,7 +93,7 @@ pub fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, force_reb
 		let pretty_source = source.strip_prefix(evscode::workspace_root()?).wrap("tried to build source outside of project directory")?;
 		return Err(evscode::E::error(format!("source `{}` does not exist", pretty_source.display())));
 	}
-	block_on(evscode::save_all())?;
+	evscode::save_all().await?;
 	let out = source.with_extension(&*EXECUTABLE_EXTENSION.get());
 	if !force_rebuild && should_cache(&source, &out)? {
 		return Ok(Executable::new(out));
@@ -111,7 +110,7 @@ pub fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, force_reb
 		if let Some(error) = status.errors.first() {
 			if let Some(location) = &error.location {
 				if *AUTO_MOVE_TO_ERROR.get() {
-					block_on(evscode::open_editor(&location.path).cursor(Position { line: location.line - 1, column: location.column - 1 }).open());
+					evscode::open_editor(&location.path).cursor(Position { line: location.line - 1, column: location.column - 1 }).open().await;
 				}
 			}
 			Err(evscode::E::error(error.message.clone()).context("compilation error").workflow_error())

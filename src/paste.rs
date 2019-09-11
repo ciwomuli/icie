@@ -4,47 +4,48 @@ mod piece_parse;
 
 use crate::{dir, telemetry::TELEMETRY};
 use evscode::{error::ResultExt, E, R};
-use futures::executor::block_on;
 use itertools::Itertools;
 use logic::{Library, Piece};
-use std::{path::PathBuf, time::SystemTime};
+use std::{future::Future, path::PathBuf, pin::Pin, time::SystemTime};
 
 #[evscode::command(title = "ICIE Quick Paste", key = "alt+[")]
-fn quick() -> R<()> {
+async fn quick() -> R<()> {
 	let _status = crate::STATUS.push("Copy-pasting");
 	TELEMETRY.paste_quick.spark();
-	let library = library::CACHED_LIBRARY.update()?;
-	let piece_id = block_on(
-		evscode::QuickPick::new()
-			.match_on_all()
-			.items(library.pieces.iter().sorted_by_key(|(_, piece)| &piece.name).map(|(id, piece)| {
-				let mut item = evscode::quick_pick::Item::new(id.clone(), piece.name.clone());
-				if let Some(description) = &piece.description {
-					item = item.description(description.clone());
-				}
-				if let Some(detail) = &piece.detail {
-					item = item.detail(detail.clone());
-				}
-				item
-			}))
-			.show(),
-	)
-	.ok_or_else(E::cancel)?;
-	let context = block_on(query_context(&library))?;
+	let library = library::CACHED_LIBRARY.update().await?;
+	let piece_id = evscode::QuickPick::new()
+		.match_on_all()
+		.items(library.pieces.iter().sorted_by_key(|(_, piece)| &piece.name).map(|(id, piece)| {
+			let mut item = evscode::quick_pick::Item::new(id.clone(), piece.name.clone());
+			if let Some(description) = &piece.description {
+				item = item.description(description.clone());
+			}
+			if let Some(detail) = &piece.detail {
+				item = item.detail(detail.clone());
+			}
+			item
+		}))
+		.show()
+		.await
+		.ok_or_else(E::cancel)?;
+	let context = query_context(&library).await?;
 	TELEMETRY.paste_quick_ok.spark();
-	library.walk_graph(&piece_id, context)?;
+	library.walk_graph(&piece_id, context).await?;
 	Ok(())
 }
 
 #[evscode::command(title = "ICIE Quick input struct", key = "alt+i")]
-fn qistruct() -> R<()> {
+async fn qistruct() -> R<()> {
 	let _status = crate::STATUS.push("Qistructing");
 	TELEMETRY.paste_qistruct.spark();
-	let name = block_on(evscode::InputBox::new().prompt("Qistruct name").placeholder("Person").show()).ok_or_else(E::cancel)?;
+	let name = evscode::InputBox::new().prompt("Qistruct name").placeholder("Person").show().await.ok_or_else(E::cancel)?;
 	let mut members = Vec::new();
-	while let Some(member) =
-		block_on(evscode::InputBox::new().prompt(&format!("Qistruct member {}", members.len() + 1)).placeholder("int age").show())
-	{
+	loop {
+		let prompt = format!("Qistruct member {}", members.len() + 1);
+		let member = match evscode::InputBox::new().prompt(&prompt).placeholder("int age").show().await {
+			Some(member) => member,
+			None => break,
+		};
 		if member.trim().is_empty() {
 			break;
 		}
@@ -74,8 +75,8 @@ fn qistruct() -> R<()> {
 	};
 	let mut library = Library::new_empty();
 	library.pieces.insert(String::from("__qistruct"), piece);
-	let context = block_on(query_context(&library))?;
-	library.walk_graph("__qistruct", context)?;
+	let context = query_context(&library).await?;
+	library.walk_graph("__qistruct", context).await?;
 	Ok(())
 }
 
@@ -97,11 +98,13 @@ impl logic::PasteContext for VscodePaste<'_> {
 		self.text.contains(&piece.guarantee)
 	}
 
-	fn paste(&mut self, piece_id: &str) -> R<()> {
-		let (position, snippet) = self.library.place(piece_id, &self.text);
-		block_on(evscode::edit_paste(&self.solution, &snippet, position));
-		self.text = block_on(evscode::query_document_text(&self.solution));
-		Ok(())
+	fn paste<'a>(&'a mut self, piece_id: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
+		Box::pin((async move || {
+			let (position, snippet) = self.library.place(piece_id, &self.text);
+			evscode::edit_paste(&self.solution, &snippet, position).await;
+			self.text = evscode::query_document_text(&self.solution).await;
+			Ok(())
+		})())
 	}
 }
 

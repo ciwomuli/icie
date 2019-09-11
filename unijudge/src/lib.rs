@@ -37,14 +37,14 @@ pub enum Error {
 		endpoint: &'static str,
 		backtrace: backtrace::Backtrace,
 		resp_raw: String,
-		inner: Option<Box<dyn std::error::Error+'static>>,
+		inner: Option<Box<dyn std::error::Error+Send+Sync+'static>>,
 	},
 	UnexpectedResponse {
 		endpoint: &'static str,
 		message: &'static str,
 		backtrace: backtrace::Backtrace,
 		resp_raw: String,
-		inner: Option<Box<dyn std::error::Error+'static>>,
+		inner: Option<Box<dyn std::error::Error+Send+Sync+'static>>,
 	},
 }
 impl From<reqwest::Error> for Error {
@@ -95,8 +95,8 @@ impl std::error::Error for Error {
 			Error::URLParseFailure(e) => Some(e),
 			Error::StateCorruption => None,
 			Error::UnexpectedHTML(e) => Some(e),
-			Error::UnexpectedJSON { inner, .. } => inner.as_ref().map(|bx| bx.as_ref()),
-			Error::UnexpectedResponse { inner, .. } => inner.as_ref().map(|bx| bx.as_ref()),
+			Error::UnexpectedJSON { inner, .. } => inner.as_ref().map(|bx| bx.as_ref() as &dyn std::error::Error),
+			Error::UnexpectedResponse { inner, .. } => inner.as_ref().map(|bx| bx.as_ref() as &dyn std::error::Error),
 		}
 	}
 }

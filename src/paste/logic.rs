@@ -1,5 +1,5 @@
 use evscode::{E, R};
-use std::{collections::HashMap, path::PathBuf, time::SystemTime};
+use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin, time::SystemTime};
 
 #[derive(Debug)]
 pub struct Library {
@@ -48,7 +48,7 @@ impl Library {
 		Ok(())
 	}
 
-	pub fn walk_graph(&self, piece_id: &str, mut context: impl PasteContext) -> R<()> {
+	pub async fn walk_graph(&self, piece_id: &str, mut context: impl PasteContext) -> R<()> {
 		let (dg, t1, t2) = self.build_dependency_graph();
 		let og = self.build_ordering_graph(&dg, &t1);
 		let mut missing = dg.vmasked_bfs(t1[piece_id], |v| !context.has(&t2[v]));
@@ -59,7 +59,7 @@ impl Library {
 		}
 		missing.sort_by_key(|v| pos[*v]);
 		for v in missing {
-			context.paste(t2[v])?;
+			context.paste(t2[v]).await?;
 		}
 		Ok(())
 	}
@@ -172,7 +172,7 @@ fn skip_to_toplevel(mut pos: usize, source: &str) -> usize {
 
 pub trait PasteContext {
 	fn has(&mut self, piece: &str) -> bool;
-	fn paste(&mut self, piece: &str) -> R<()>;
+	fn paste<'a>(&'a mut self, piece: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>>;
 }
 
 struct Graph {
@@ -258,10 +258,10 @@ impl Graph {
 mod tests {
 	use super::*;
 
-	#[test]
-	fn dependency_order() {
+	#[tokio::test]
+	async fn dependency_order() {
 		let lib = example_library();
-		let orders = paste_iter(&lib, "dfs");
+		let orders = paste_iter(&lib, "dfs").await;
 		assert!((orders[0] == "dummyf" && orders[1] == "graph") || (orders[0] == "graph" && orders[1] == "dummyf"));
 		assert_eq!(orders[2], "dfs-impl");
 		assert_eq!(orders[3], "dfs");
@@ -301,8 +301,8 @@ mod tests {
 		assert!(lib.verify().is_err());
 	}
 
-	#[test]
-	fn placing_basic() {
+	#[tokio::test]
+	async fn placing_basic() {
 		let lib = linear_library();
 		assert_eq!(
 			replace(
@@ -315,7 +315,8 @@ int main() {
 
 }
 "#
-			),
+			)
+			.await,
 			r#"#include <bits/stdc++.h>
 using namespace std;
 
@@ -332,8 +333,8 @@ int main() {
 		);
 	}
 
-	#[test]
-	fn placing_partial() {
+	#[tokio::test]
+	async fn placing_partial() {
 		let lib = linear_library();
 		assert_eq!(
 			replace(
@@ -348,7 +349,8 @@ int main() {
 
 }
 "#
-			),
+			)
+			.await,
 			r#"#include <bits/stdc++.h>
 using namespace std;
 
@@ -365,8 +367,8 @@ int main() {
 		);
 	}
 
-	#[test]
-	fn in_group_ordering() {
+	#[tokio::test]
+	async fn in_group_ordering() {
 		let mut lib1 = Library::new_empty();
 		lib1.pieces.insert("graph".to_owned(), Piece {
 			name: "Graph".to_owned(),
@@ -391,13 +393,13 @@ struct Graph {
 };
 
 "#;
-		assert_eq!(replace(&lib1, "dominator", ""), desired);
-		assert_eq!(replace(&lib2, "dominator", ""), desired);
+		assert_eq!(replace(&lib1, "dominator", "").await, desired);
+		assert_eq!(replace(&lib2, "dominator", "").await, desired);
 	}
 
-	fn replace(lib: &Library, piece: &str, code: &str) -> String {
+	async fn replace(lib: &Library, piece: &str, code: &str) -> String {
 		let mut buf = code.to_owned();
-		lib.walk_graph(piece, PlaceMockContext { lib: &lib, buf: &mut buf }).unwrap();
+		lib.walk_graph(piece, PlaceMockContext { lib: &lib, buf: &mut buf }).await.unwrap();
 		buf
 	}
 
@@ -410,23 +412,25 @@ struct Graph {
 			self.buf.contains(&self.lib.pieces[piece].guarantee)
 		}
 
-		fn paste(&mut self, piece: &str) -> R<()> {
-			let ((line, column), snippet) = self.lib.place(piece, &self.buf);
-			*self.buf = self
-				.buf
-				.split('\n')
-				.enumerate()
-				.map(|(i, row)| if i == line { format!("{}{}{}", &row[..column], snippet, &row[column..]) } else { row.to_owned() })
-				.collect::<Vec<_>>()
-				.join("\n");
-			Ok(())
+		fn paste<'a>(&'a mut self, piece: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
+			Box::pin((async move || {
+				let ((line, column), snippet) = self.lib.place(piece, &self.buf);
+				*self.buf = self
+					.buf
+					.split('\n')
+					.enumerate()
+					.map(|(i, row)| if i == line { format!("{}{}{}", &row[..column], snippet, &row[column..]) } else { row.to_owned() })
+					.collect::<Vec<_>>()
+					.join("\n");
+				Ok(())
+			})())
 		}
 	}
 
-	fn paste_iter(lib: &Library, piece_id: &str) -> Vec<String> {
+	async fn paste_iter(lib: &Library, piece_id: &str) -> Vec<String> {
 		let mut buf = Vec::new();
 		let ctx = MockContext { buf: &mut buf };
-		lib.walk_graph(piece_id, ctx).unwrap();
+		lib.walk_graph(piece_id, ctx).await.unwrap();
 		buf
 	}
 
@@ -438,9 +442,11 @@ struct Graph {
 			self.buf.contains(&piece_id.to_owned())
 		}
 
-		fn paste(&mut self, piece_id: &str) -> Result<(), E> {
-			self.buf.push(piece_id.to_owned());
-			Ok(())
+		fn paste<'a>(&'a mut self, piece_id: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
+			Box::pin((async move || {
+				self.buf.push(piece_id.to_owned());
+				Ok(())
+			})())
 		}
 	}
 

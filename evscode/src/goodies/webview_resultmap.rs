@@ -1,6 +1,7 @@
 //! Associative webview collection that represents a set of computation results.
 
-use crate::{goodies::WebviewHandle, Webview, R};
+use crate::{future2::BoxedFuture, goodies::WebviewHandle, Webview, R};
+use futures::executor::block_on;
 use std::{
 	collections::HashMap, hash::Hash, sync::{Arc, Mutex}
 };
@@ -18,7 +19,7 @@ pub trait Computation: Sync {
 	/// Update a webview with given computation results.
 	fn update(&self, key: &Self::K, value: &Self::V, webview: &Webview) -> R<()>;
 	/// Return a worker function which will handle the messages received from the webview.
-	fn manage(&self, key: &Self::K, value: &Self::V, handle: WebviewHandle) -> R<Box<dyn FnOnce() -> R<()>+Send+'static>>;
+	fn manage(&self, key: &Self::K, value: &Self::V, handle: WebviewHandle) -> R<BoxedFuture<'static, R<()>>>;
 }
 
 /// State of the webview collection.
@@ -49,7 +50,7 @@ impl<T: Computation> WebviewResultmap<T> {
 	pub fn find_active(&self) -> Option<WebviewHandle> {
 		let lck = self.collection.lock().unwrap();
 		for webview in lck.values() {
-			if webview.lock().unwrap().is_active().wait() {
+			if block_on(webview.lock().unwrap().is_active()) {
 				return Some(webview.clone());
 			}
 		}
@@ -100,16 +101,17 @@ impl<T: Computation> WebviewResultmap<T> {
 		let worker = self.computation.manage(key, &value, webview.clone())?;
 		let key = key.clone();
 		let handle = webview.clone();
-		crate::runtime::spawn(move || {
-			let delayed_error = worker();
-			let mut collection = self.collection.lock().unwrap();
+		crate::runtime::spawn_async((async move || {
+			let resultmap: &'static WebviewResultmap<T> = self;
+			let delayed_error = worker.await;
+			let mut collection = resultmap.collection.lock().unwrap();
 			if let std::collections::hash_map::Entry::Occupied(e) = collection.entry(key) {
 				if Arc::ptr_eq(e.get(), &handle) {
 					e.remove_entry();
 				}
 			}
 			delayed_error
-		});
+		})());
 		Ok((webview, value))
 	}
 

@@ -5,7 +5,7 @@ use std::{
 };
 
 #[evscode::command(title = "ICIE Terminal", key = "alt+t")]
-fn spawn() -> R<()> {
+async fn spawn() -> R<()> {
 	External::command::<String, Vec<String>, String>(None, None)
 }
 

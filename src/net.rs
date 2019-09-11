@@ -3,9 +3,9 @@ use crate::{
 };
 use evscode::{error::ResultExt, E, R};
 use reqwest::header::HeaderValue;
-use std::{fmt, thread::sleep, time::Duration};
+use std::{fmt, future::Future, pin::Pin, thread::sleep, time::Duration};
 use unijudge::{
-	boxed::{BoxedURL, DynamicBackend}, Backend, Resource, URL
+	boxed::{BoxedSession, BoxedURL, DynamicBackend}, Backend, Resource, URL
 };
 
 const USER_AGENT: &str = concat!("ICIE/", env!("CARGO_PKG_VERSION"), " (+https://github.com/pustaczek/icie)");
@@ -20,10 +20,9 @@ pub static BACKENDS: [BackendMeta; 5] = [
 	BackendMeta::new(&unijudge_spoj::SPOJ, "C++14 (clang 8.0)", "unijudge_spoj"),
 ];
 
-pub type Session = GenericSession<dyn DynamicBackend>;
-pub struct GenericSession<T: Backend+?Sized> {
-	pub backend: &'static T,
-	pub session: T::Session,
+pub struct Session {
+	pub backend: &'static dyn DynamicBackend,
+	pub session: BoxedSession,
 	site: String,
 	domain: String,
 }
@@ -57,8 +56,8 @@ pub fn interpret_url(url: &str) -> R<(BoxedURL, &'static BackendMeta)> {
 		.map_err(from_unijudge_error)?)
 }
 
-impl<T: Backend+?Sized> GenericSession<T> {
-	pub fn connect(domain: &str, backend: &'static T) -> R<GenericSession<T>> {
+impl Session {
+	pub fn connect(domain: &str, backend: &'static dyn DynamicBackend) -> R<Session> {
 		TELEMETRY.net_connect.spark();
 		let client = reqwest::ClientBuilder::new()
 			.cookie_store(true)
@@ -81,10 +80,10 @@ impl<T: Backend+?Sized> GenericSession<T> {
 		} else {
 			log::debug!("cached auth not available for {}", domain);
 		}
-		Ok(GenericSession { backend, session, site, domain: domain.to_owned() })
+		Ok(Session { backend, session, site, domain: domain.to_owned() })
 	}
 
-	pub fn run<Y>(&self, mut f: impl FnMut(&'static T, &T::Session) -> unijudge::Result<Y>) -> R<Y> {
+	pub async fn run<Y>(&self, mut f: impl FnMut(&'static dyn DynamicBackend, &BoxedSession) -> unijudge::Result<Y>) -> R<Y> {
 		let mut retries_left = NETWORK_ERROR_RETRY_LIMIT;
 		loop {
 			match f(self.backend, &self.session) {
@@ -92,8 +91,8 @@ impl<T: Backend+?Sized> GenericSession<T> {
 				Err(e @ unijudge::Error::WrongCredentials) | Err(e @ unijudge::Error::AccessDenied) => {
 					log::debug!("access denied for {}, trying to log in {:?}", self.domain, e);
 					self.maybe_error_show(e);
-					let (username, password) = auth::get_cached_or_ask(&self.site)?;
-					self.login(&username, &password)?
+					let (username, password) = auth::get_cached_or_ask(&self.site).await?;
+					self.login(&username, &password).await?
 				},
 				Err(unijudge::Error::NetworkFailure(e)) if retries_left > 0 => self.wait_for_retry(&mut retries_left, e),
 				Err(e) => break Err(from_unijudge_error(e)),
@@ -101,7 +100,7 @@ impl<T: Backend+?Sized> GenericSession<T> {
 		}
 	}
 
-	pub fn login(&self, username: &str, password: &str) -> R<()> {
+	pub async fn login(&self, username: &str, password: &str) -> R<()> {
 		let mut retries_left = NETWORK_ERROR_RETRY_LIMIT;
 		match self.backend.auth_login(&self.session, &username, &password) {
 			Ok(()) => {
@@ -116,7 +115,7 @@ impl<T: Backend+?Sized> GenericSession<T> {
 			Err(e @ unijudge::Error::WrongData) | Err(e @ unijudge::Error::WrongCredentials) | Err(e @ unijudge::Error::AccessDenied) => {
 				log::warn!("login failure for {}, {:?}", self.domain, e);
 				self.maybe_error_show(e);
-				self.force_login()?;
+				self.force_login_boxed().await?;
 			},
 			Err(unijudge::Error::NetworkFailure(e)) if retries_left > 0 => self.wait_for_retry(&mut retries_left, e),
 			Err(e) => return Err(from_unijudge_error(e)),
@@ -124,9 +123,13 @@ impl<T: Backend+?Sized> GenericSession<T> {
 		Ok(())
 	}
 
-	pub fn force_login(&self) -> R<()> {
-		let (username, password) = auth::get_force_ask(&self.site)?;
-		self.login(&username, &password)
+	pub async fn force_login(&self) -> R<()> {
+		let (username, password) = auth::get_force_ask(&self.site).await?;
+		self.login(&username, &password).await
+	}
+
+	fn force_login_boxed<'a>(&'a self) -> Pin<Box<dyn Future<Output=R<()>>+Send+Sync+'a>> {
+		Box::pin(self.force_login())
 	}
 
 	fn maybe_error_show(&self, e: unijudge::Error) {

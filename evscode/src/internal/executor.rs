@@ -1,16 +1,16 @@
-use crate::{error::Severity, meta::ConfigEntry, stdlib::message::Action, E, R};
+use crate::{error::Severity, meta::ConfigEntry, runtime::spawn_async, stdlib::message::Action, E, R};
 use arc_swap::ArcSwapOption;
-use futures::executor::block_on;
+use futures::{executor::block_on, FutureExt};
 use json::{object, JsonValue};
 use lazy_static::lazy_static;
 use log::LevelFilter;
 use std::{
-	collections::HashMap, io::BufRead, path::PathBuf, sync::{
-		atomic::{AtomicU64, Ordering}, mpsc::Sender, Arc, Mutex
+	collections::{HashMap, VecDeque}, io::BufRead, path::PathBuf, sync::{
+		atomic::{AtomicU64, Ordering}, Arc, Mutex
 	}, task::Waker
 };
 
-pub fn execute(pkg: &'static crate::meta::Package) {
+pub fn execute(pkg: &'static mut crate::meta::Package) {
 	set_panic_hook();
 	let logger = crate::internal::logger::VSCodeLoger { blacklist: pkg.log_filters.iter().map(|(id, fil)| (*id, *fil)).collect() };
 	log::set_boxed_logger(Box::new(logger)).expect("evscode::execute failed to set logger");
@@ -22,17 +22,11 @@ pub fn execute(pkg: &'static crate::meta::Package) {
 		if impulse["tag"] == "async" {
 			let aid = impulse["aid"].as_u64().expect("evscode::execute impulse .tag['async'] has no .aid[u64]");
 			let value = impulse["value"].take();
-			let lck = ASYNC_OPS.lock().expect("evscode::execute ASYNC_OPS PoisonError");
-			if let Some(tx) = lck.get(&aid) {
-				tx.send(crate::future::Packet::new(aid, value)).expect("evscode::execute async SendError");
-			} else {
-				drop(lck);
-				let mut lck2 = ASYNC_OPS2.lock().expect("evscode::execute ASYNC_OPS2 PoisonError");
-				if let Some(entry) = lck2.get_mut(&aid) {
-					entry.0 = Some(value);
-					if let Some(waker) = entry.1.take() {
-						waker.wake();
-					}
+			let mut lck2 = ASYNC_OPS2.lock().expect("evscode::execute ASYNC_OPS2 PoisonError");
+			if let Some(entry) = lck2.get_mut(&aid) {
+				entry.0 = Some(value);
+				if let Some(waker) = entry.1.take() {
+					waker.wake();
 				}
 			}
 		} else if impulse["tag"] == "trigger" {
@@ -41,8 +35,7 @@ pub fn execute(pkg: &'static crate::meta::Package) {
 				Some(command) => command,
 				None => panic!("evscode::execute unknown command {:?}, known: {:?}", id, pkg.commands.iter().map(|cmd| cmd.id).collect::<Vec<_>>()),
 			};
-			let trigger = command.trigger;
-			spawn(trigger);
+			spawn_async((command.trigger)());
 		} else if impulse["tag"] == "config" {
 			let tree = &impulse["tree"];
 			let mut errors = Vec::new();
@@ -61,18 +54,18 @@ pub fn execute(pkg: &'static crate::meta::Package) {
 		} else if impulse["tag"] == "meta" {
 			*WORKSPACE_ROOT.lock().unwrap() = impulse["workspace"].as_str().map(PathBuf::from);
 			*EXTENSION_ROOT.lock().unwrap() = Some(PathBuf::from(impulse["extension"].as_str().unwrap()));
-			if let Some(on_activate) = &pkg.on_activate {
-				spawn(*on_activate);
+			if let Some(on_activate) = pkg.on_activate.take() {
+				spawn_async(on_activate);
 			}
 		} else if impulse["tag"] == "dispose" {
-			if let Some(on_deactivate) = pkg.on_deactivate {
-				spawn(move || {
-					if let Err(e) = on_deactivate() {
+			if let Some(on_deactivate) = pkg.on_deactivate.take() {
+				spawn_async(on_deactivate.map(|r| {
+					if let Err(e) = r {
 						error_show(e);
 					}
 					kill();
 					Ok(())
-				});
+				}));
 			} else {
 				kill();
 			}
@@ -105,19 +98,17 @@ pub fn error_show(e: crate::E) {
 		Severity::Workflow => true,
 	};
 	if should_show {
-		{
-			let mut log_msg = String::new();
-			for reason in &e.reasons {
-				log_msg += &format!("{}\n", reason);
-			}
-			for detail in &e.details {
-				log_msg += &format!("{}\n", detail);
-			}
-			log_msg += &format!("\nContains {} extended log entries\n\n{:?}", e.extended.len(), e.backtrace);
-			log::error!("{}", log_msg);
-			for extended in &e.extended {
-				log::info!("{}", extended);
-			}
+		let mut log_msg = String::new();
+		for reason in &e.reasons {
+			log_msg += &format!("{}\n", reason);
+		}
+		for detail in &e.details {
+			log_msg += &format!("{}\n", detail);
+		}
+		log_msg += &format!("\nContains {} extended log entries\n\n{:?}", e.extended.len(), e.backtrace);
+		log::error!("{}", log_msg);
+		for extended in &e.extended {
+			log::info!("{}", extended);
 		}
 		let should_suggest_report = match e.severity {
 			Severity::Error => true,
@@ -127,22 +118,20 @@ pub fn error_show(e: crate::E) {
 		};
 		let message =
 			format!("{}{}", e.human(), if should_suggest_report { "; [report issue?](https://github.com/pustaczek/icie/issues)" } else { "" });
-		std::thread::spawn(move || {
-			let mut msg = crate::Message::new(&message).error().items(e.actions.iter().enumerate().map(|(i, action)| Action {
-				id: i.to_string(),
-				title: &action.title,
-				is_close_affordance: false,
-			}));
-			if let Severity::Warning = e.severity {
-				msg = msg.warning();
-			}
-			let choice = block_on(msg.show());
-			if let Some(choice) = choice {
-				let i: usize = choice.parse().unwrap();
-				let action = &e.actions[i];
-				spawn(action.trigger);
-			}
-		});
+		let mut msg = crate::Message::new(&message).error().items(e.actions.iter().enumerate().map(|(i, action)| Action {
+			id: i.to_string(),
+			title: &action.title,
+			is_close_affordance: false,
+		}));
+		if let Severity::Warning = e.severity {
+			msg = msg.warning();
+		}
+		let choice = block_on(msg.show());
+		if let Some(choice) = choice {
+			let i: usize = choice.parse().unwrap();
+			let action = e.actions.into_iter().nth(i).unwrap();
+			spawn_async(action.trigger);
+		}
 	}
 }
 
@@ -155,16 +144,16 @@ fn kill() {
 pub(crate) static ASYNC_ID_FACTORY: IDFactory = IDFactory::new();
 pub(crate) static HANDLE_FACTORY: IDFactory = IDFactory::new();
 
-type PacketChannel = Sender<crate::future::Packet>;
 type PacketChannelAwait = (Option<JsonValue>, Option<Waker>);
+pub(crate) type PacketChannelStream = (VecDeque<JsonValue>, Option<Waker>);
 
 lazy_static! {
 	pub(crate) static ref CONFIG_ENTRIES: ArcSwapOption<&'static [ConfigEntry]> = ArcSwapOption::new(None);
 }
 
 lazy_static! {
-	pub(crate) static ref ASYNC_OPS: Mutex<HashMap<u64, PacketChannel>> = Mutex::new(HashMap::new());
 	pub(crate) static ref ASYNC_OPS2: Mutex<HashMap<u64, PacketChannelAwait>> = Mutex::new(HashMap::new());
+	pub(crate) static ref ASYNC_STREAMS: Mutex<HashMap<u64, PacketChannelStream>> = Mutex::new(HashMap::new());
 }
 
 lazy_static! {

@@ -6,7 +6,7 @@ edition = "2018"
 
 [dependencies]
 evscode = { path = "./evscode" }
-futures-preview = "0.3.0-alpha.18"
+futures-preview = { version = "0.3.0-alpha.18", features = ["async-await", "nightly"] }
 itertools = "0.8"
 json = "0.12"
 keyring = "0.7"
@@ -19,6 +19,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 shellexpand = "1.0"
 tempfile = "3.1"
+tokio = "0.2.0-alpha.4"
 unijudge = { path = "./unijudge" }
 unijudge-atcoder = { path = "./unijudge-atcoder" }
 unijudge-codechef = { path = "./unijudge-codechef" }

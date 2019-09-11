@@ -4,10 +4,13 @@
 //! directly. See also the [official webview tutorial](https://code.visualstudio.com/api/extension-guides/webview).
 
 use crate::{
-	internal::executor::{send_object, HANDLE_FACTORY}, Column, LazyFuture
+	future2::{Pong, PongStream}, internal::executor::{send_object, HANDLE_FACTORY}, Column
 };
+use futures::Stream;
 use json::JsonValue;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+	future::Future, sync::atomic::{AtomicBool, Ordering}
+};
 
 /// Builder for configurating webviews. See [module documentation](index.html) for details.
 #[must_use]
@@ -133,48 +136,39 @@ impl Webview {
 	}
 
 	/// Check if the webview can be seen by the user.
-	pub fn is_visible(&self) -> LazyFuture<bool> {
+	pub async fn is_visible(&self) -> bool {
 		let hid = self.hid;
-		LazyFuture::new_vscode(
-			move |aid| {
-				send_object(json::object! {
-					"tag" => "webview_is_visible",
-					"hid" => hid,
-					"aid" => aid,
-				})
-			},
-			|raw| raw.as_bool().unwrap(),
-		)
+		let pong = Pong::new();
+		send_object(json::object! {
+			"tag" => "webview_is_visible",
+			"hid" => hid,
+			"aid" => pong.aid(),
+		});
+		pong.await.as_bool().unwrap()
 	}
 
 	/// Check whether the webview is the currently active webview.
-	pub fn is_active(&self) -> LazyFuture<bool> {
+	pub async fn is_active(&self) -> bool {
 		let hid = self.hid;
-		LazyFuture::new_vscode(
-			move |aid| {
-				send_object(json::object! {
-					"tag" => "webview_is_active",
-					"hid" => hid,
-					"aid" => aid,
-				})
-			},
-			|raw| raw.as_bool().unwrap(),
-		)
+		let pong = Pong::new();
+		send_object(json::object! {
+			"tag" => "webview_is_active",
+			"hid" => hid,
+			"aid" => pong.aid(),
+		});
+		pong.await.as_bool().unwrap()
 	}
 
 	/// Check whether the webview was closed.
-	pub fn was_disposed(&self) -> LazyFuture<bool> {
+	pub async fn was_disposed(&self) -> bool {
 		let hid = self.hid;
-		LazyFuture::new_vscode(
-			move |aid| {
-				send_object(json::object! {
-					"tag" => "webview_was_disposed",
-					"hid" => hid,
-					"aid" => aid,
-				})
-			},
-			|raw| raw.as_bool().unwrap(),
-		)
+		let pong = Pong::new();
+		send_object(json::object! {
+			"tag" => "webview_was_disposed",
+			"hid" => hid,
+			"aid" => pong.aid(),
+		});
+		pong.await.as_bool().unwrap()
 	}
 
 	/// Show the webview in the given view column.
@@ -197,35 +191,31 @@ impl Webview {
 
 	/// Returns a lazy future that will yield message [sent by JS inside the webview](https://code.visualstudio.com/api/extension-guides/webview#passing-messages-from-a-webview-to-an-extension).
 	/// This function can only be called once.
-	pub fn listener(&self) -> LazyFuture<JsonValue> {
+	pub fn listener(&self) -> impl Stream<Item=JsonValue> {
 		assert!(!self.listener_spawned.fetch_or(true, Ordering::SeqCst));
 		let hid = self.hid;
-		LazyFuture::new_vscode(
-			move |aid| {
-				send_object(json::object! {
-					"tag" => "webview_register_listener",
-					"hid" => hid,
-					"aid" => aid,
-				})
-			},
-			|raw| raw.clone(),
-		)
+		let pong = PongStream::new();
+		send_object(json::object! {
+			"tag" => "webview_register_listener",
+			"hid" => hid,
+			"aid" => pong.aid(),
+		});
+		pong
 	}
 
-	/// Returns a lazy future that will yield `()` when the webview is closed.
+	/// Yields `()` when the webview is closed.
 	/// This function can only be called once.
-	pub fn disposer(&self) -> LazyFuture<()> {
+	pub fn disposer(&self) -> impl Future<Output=()> {
 		assert!(!self.disposer_spawned.fetch_or(true, Ordering::SeqCst));
 		let hid = self.hid;
-		LazyFuture::new_vscode(
-			move |aid| {
-				send_object(json::object! {
-					"tag" => "webview_register_disposer",
-					"hid" => hid,
-					"aid" => aid,
-				})
-			},
-			|_| (),
-		)
+		let pong = Pong::new();
+		send_object(json::object! {
+			"tag" => "webview_register_disposer",
+			"hid" => hid,
+			"aid" => pong.aid(),
+		});
+		async {
+			pong.await;
+		}
 	}
 }
