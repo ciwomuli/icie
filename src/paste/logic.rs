@@ -413,7 +413,7 @@ struct Graph {
 		}
 
 		fn paste<'a>(&'a mut self, piece: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
-			Box::pin((async move || {
+			Box::pin(async move {
 				let ((line, column), snippet) = self.lib.place(piece, &self.buf);
 				*self.buf = self
 					.buf
@@ -423,7 +423,7 @@ struct Graph {
 					.collect::<Vec<_>>()
 					.join("\n");
 				Ok(())
-			})())
+			})
 		}
 	}
 
@@ -443,10 +443,10 @@ struct Graph {
 		}
 
 		fn paste<'a>(&'a mut self, piece_id: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
-			Box::pin((async move || {
+			Box::pin(async move {
 				self.buf.push(piece_id.to_owned());
 				Ok(())
-			})())
+			})
 		}
 	}
 

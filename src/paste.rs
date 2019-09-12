@@ -99,12 +99,12 @@ impl logic::PasteContext for VscodePaste<'_> {
 	}
 
 	fn paste<'a>(&'a mut self, piece_id: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
-		Box::pin((async move || {
+		Box::pin(async move {
 			let (position, snippet) = self.library.place(piece_id, &self.text);
 			evscode::edit_paste(&self.solution, &snippet, position).await;
 			self.text = evscode::query_document_text(&self.solution).await;
 			Ok(())
-		})())
+		})
 	}
 }
 

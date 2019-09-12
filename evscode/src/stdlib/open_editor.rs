@@ -1,6 +1,6 @@
 //! Builder pattern implementation for opening an editor.
 
-use crate::{future2::Pong, internal::executor::send_object, Column, Position, Range};
+use crate::{future::Pong, internal::executor::send_object, Column, Position, Range};
 use std::path::Path;
 
 /// Builder for opening text files in a VS Code editor.

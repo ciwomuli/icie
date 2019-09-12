@@ -13,7 +13,7 @@ pub async fn fetch_contests() -> Vec<(Arc<net::Session>, BoxedContestDetails, &'
 		.collect::<Vec<_>>();
 	let _status = crate::STATUS.push_silence();
 	join_all(domains.iter().map(|(domain, backend)| {
-		(async move || {
+		async move {
 			(
 				domain,
 				try {
@@ -24,7 +24,7 @@ pub async fn fetch_contests() -> Vec<(Arc<net::Session>, BoxedContestDetails, &'
 					(sess, contests, *backend)
 				},
 			)
-		})()
+		}
 	}))
 	.await
 	.into_iter()

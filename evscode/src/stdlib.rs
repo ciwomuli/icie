@@ -23,7 +23,7 @@ pub use terminal::Terminal;
 pub use types::*;
 pub use webview::Webview;
 
-use crate::{future2::Pong, internal::executor::send_object, E, R};
+use crate::{future::Pong, internal::executor::send_object, E, R};
 use std::{
 	borrow::Borrow, path::{Path, PathBuf}
 };

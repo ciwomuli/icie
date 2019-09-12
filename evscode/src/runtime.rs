@@ -1,19 +1,22 @@
 //! Runtime used by Evscode to manage communicating with VS Code
 
-use crate::{internal::executor::CONFIG_ENTRIES, meta::ConfigEntry, R};
-use futures::executor::block_on;
+use crate::{
+	internal::executor::{error_show, runtime_handle, CONFIG_ENTRIES}, meta::ConfigEntry, R
+};
 use std::{future::Future, sync::Arc};
-
-/// Spawn a thread. If the function fails, the error returned from the function will be displayed to the user.
-pub fn spawn(f: impl FnOnce() -> R<()>+Send+'static) {
-	crate::internal::executor::spawn(f)
-}
 
 /// Spawn an async operation in a new thread.
 ///
 /// See [`spawn`] for details.
 pub fn spawn_async(f: impl Future<Output=R<()>>+Send+'static) {
-	spawn(move || block_on(f))
+	runtime_handle()
+		.spawn(async move {
+			match f.await {
+				Ok(()) => (),
+				Err(e) => error_show(e),
+			}
+		})
+		.expect("internal error not being able to spawn task");
 }
 
 /// Returns a vector with metadata on all configuration entries in the plugin.

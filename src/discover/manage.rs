@@ -7,7 +7,7 @@ use evscode::{
 	error::{cancel_on, ResultExt}, E, R
 };
 use futures::{
-	executor::block_on, stream::{select, StreamExt}, SinkExt, Stream
+	channel::mpsc, poll, stream::{select, StreamExt}, Poll, SinkExt, Stream
 };
 use std::{future::Future, pin::Pin};
 
@@ -19,10 +19,10 @@ fn webview_manage_wrapper(handle: evscode::goodies::WebviewHandle) -> Pin<Box<dy
 	Box::pin(webview_manage(handle))
 }
 async fn webview_manage(handle: evscode::goodies::WebviewHandle) -> R<()> {
-	let (mut stream, worker_tx) = {
-		let view = handle.lock().unwrap();
+	let (mut stream, mut worker_tx) = {
+		let view = handle.lock().await;
 		view.set_html(render());
-		let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+		let (worker_tx, worker_rx) = mpsc::unbounded();
 		let worker_reports = spawn_worker(worker_rx);
 		let stream = cancel_on::<R<ManagerMessage>, _, _>(
 			select(view.listener().map(|n| Ok(ManagerMessage::Note(Note::from(n)))), worker_reports.map(ManagerMessage::Report).map(Ok)),
@@ -36,30 +36,30 @@ async fn webview_manage(handle: evscode::goodies::WebviewHandle) -> R<()> {
 	let mut paused = false;
 
 	while let Some(msg) = stream.next().await {
-		let view = handle.lock().unwrap();
+		let view = handle.lock().await;
 		match msg?? {
 			ManagerMessage::Note(note) => match note {
 				Note::Start => {
 					TELEMETRY.discover_start.spark();
 					paused = false;
-					worker_tx.send(WorkerOrder::Start).unwrap();
+					worker_tx.send(WorkerOrder::Start).await.unwrap();
 					view.post_message(Food::State { running: true, reset: false });
 				},
 				Note::Pause => {
 					paused = true;
-					worker_tx.send(WorkerOrder::Pause).unwrap();
+					worker_tx.send(WorkerOrder::Pause).await.unwrap();
 					view.post_message(Food::State { running: false, reset: false });
 				},
 				Note::Reset => {
 					best_fitness = None;
 					paused = false;
-					worker_tx.send(WorkerOrder::Reset).unwrap();
+					worker_tx.send(WorkerOrder::Reset).await.unwrap();
 					view.post_message(Food::State { running: false, reset: true });
 				},
 				Note::Save { input } => {
 					if !paused {
 						paused = true;
-						worker_tx.send(WorkerOrder::Pause).unwrap();
+						worker_tx.send(WorkerOrder::Pause).await.unwrap();
 					}
 					view.post_message(Food::State { running: false, reset: false });
 					evscode::runtime::spawn_async(add_test_input(input));
@@ -83,7 +83,7 @@ async fn webview_manage(handle: evscode::goodies::WebviewHandle) -> R<()> {
 					best_fitness = None;
 					paused = false;
 					view.post_message(Food::State { running: false, reset: true });
-					evscode::internal::executor::error_show(e);
+					e.emit();
 				},
 			},
 		}
@@ -91,23 +91,23 @@ async fn webview_manage(handle: evscode::goodies::WebviewHandle) -> R<()> {
 	Ok(())
 }
 
-fn spawn_worker(orders: std::sync::mpsc::Receiver<WorkerOrder>) -> impl Stream<Item=WorkerReport> {
+fn spawn_worker(orders: mpsc::UnboundedReceiver<WorkerOrder>) -> impl Stream<Item=WorkerReport> {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
-	evscode::runtime::spawn_async((async move || {
+	evscode::runtime::spawn_async(async move {
 		worker_thread(tx, orders).await;
 		Ok(())
-	})());
+	});
 	rx
 }
 
-async fn worker_thread(mut carrier: futures::channel::mpsc::UnboundedSender<WorkerReport>, mut orders: std::sync::mpsc::Receiver<WorkerOrder>) {
+async fn worker_thread(mut carrier: mpsc::UnboundedSender<WorkerReport>, mut orders: mpsc::UnboundedReceiver<WorkerOrder>) {
 	loop {
-		match orders.recv() {
-			Ok(WorkerOrder::Start) => (),
-			Ok(WorkerOrder::Pause) | Ok(WorkerOrder::Reset) => continue,
-			Err(std::sync::mpsc::RecvError) => break,
+		match orders.next().await {
+			Some(WorkerOrder::Start) => (),
+			Some(WorkerOrder::Pause) | Some(WorkerOrder::Reset) => continue,
+			None => break,
 		};
-		// orders is moved like that, because std::sync::mpsc::Receiver is non-Sync, so a reference to it is non-Send, which makes the whole future non-Send
+		// orders is moved like that, because mpsc::Receiver is non-Sync, so a reference to it is non-Send, which makes the whole future non-Send
 		match worker_run(&mut carrier, orders).await {
 			Ok(ret_orders) => orders = ret_orders,
 			Err(e) => {
@@ -119,9 +119,9 @@ async fn worker_thread(mut carrier: futures::channel::mpsc::UnboundedSender<Work
 }
 
 async fn worker_run(
-	carrier: &mut futures::channel::mpsc::UnboundedSender<WorkerReport>,
-	orders: std::sync::mpsc::Receiver<WorkerOrder>,
-) -> R<std::sync::mpsc::Receiver<WorkerOrder>> {
+	carrier: &mut mpsc::UnboundedSender<WorkerReport>,
+	mut orders: mpsc::UnboundedReceiver<WorkerOrder>,
+) -> R<mpsc::UnboundedReceiver<WorkerOrder>> {
 	let solution = crate::build::build(crate::dir::solution()?, &ci::cpp::Codegen::Debug, false).await?;
 	let brut = crate::build::build(crate::dir::brut()?, &ci::cpp::Codegen::Release, false).await?;
 	let gen = crate::build::build(crate::dir::gen()?, &ci::cpp::Codegen::Release, false).await?;
@@ -131,36 +131,36 @@ async fn worker_run(
 	};
 	let mut _status = crate::STATUS.push("Discovering");
 	for number in 1.. {
-		match orders.try_recv() {
-			Ok(WorkerOrder::Start) => (),
-			Ok(WorkerOrder::Pause) => {
+		match poll!(orders.next()) {
+			Poll::Ready(Some(WorkerOrder::Start)) => (),
+			Poll::Ready(Some(WorkerOrder::Pause)) => {
 				drop(_status);
 				loop {
-					match orders.recv() {
-						Ok(WorkerOrder::Start) => break,
-						Ok(WorkerOrder::Pause) => (),
-						Ok(WorkerOrder::Reset) => return Err(E::cancel()),
-						Err(std::sync::mpsc::RecvError) => return Err(E::cancel()),
+					match orders.next().await {
+						Some(WorkerOrder::Start) => break,
+						Some(WorkerOrder::Pause) => (),
+						Some(WorkerOrder::Reset) => return Err(E::cancel()),
+						None => return Err(E::cancel()),
 					}
 				}
 				_status = crate::STATUS.push("Discovering");
 			},
-			Ok(WorkerOrder::Reset) => break,
-			Err(std::sync::mpsc::TryRecvError::Empty) => (),
-			Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err(E::cancel()),
+			Poll::Ready(Some(WorkerOrder::Reset)) => break,
+			Poll::Ready(None) => return Err(E::cancel()),
+			Poll::Pending => (),
 		}
-		let run_gen = gen.run("", &[], &task.environment).map_err(|e| e.context("failed to run the test generator"))?;
+		let run_gen = gen.run("", &[], &task.environment).await.map_err(|e| e.context("failed to run the test generator"))?;
 		if !run_gen.success() {
 			return Err(E::error(format!("test generator failed {:?}", run_gen)));
 		}
 		let input = run_gen.stdout;
-		let run_brut = brut.run(&input, &[], &task.environment).map_err(|e| e.context("failed to run slow solution"))?;
+		let run_brut = brut.run(&input, &[], &task.environment).await.map_err(|e| e.context("failed to run slow solution"))?;
 		if !run_brut.success() {
 			return Err(E::error(format!("brut failed {:?}", run_brut)));
 		}
 		let desired = run_brut.stdout;
 		let outcome =
-			ci::test::simple_test(&solution, &input, Some(&desired), None, &task).map_err(|e| e.context("failed to run test in discover"))?;
+			ci::test::simple_test(&solution, &input, Some(&desired), None, &task).await.map_err(|e| e.context("failed to run test in discover"))?;
 		let fitness = -(input.len() as i64);
 		let row = Row { number, solution: outcome, fitness, input };
 		if carrier.send(Ok(row)).await.is_err() {
@@ -173,18 +173,19 @@ async fn worker_run(
 async fn add_test_input(input: String) -> R<()> {
 	let _status = crate::STATUS.push("Adding new test");
 	let brut = crate::build::build(crate::dir::brut()?, &ci::cpp::Codegen::Release, false).await?;
-	let run = brut.run(&input, &[], &ci::exec::Environment { time_limit: None }).map_err(|e| e.context("failed to generate output for the test"))?;
+	let run =
+		brut.run(&input, &[], &ci::exec::Environment { time_limit: None }).await.map_err(|e| e.context("failed to generate output for the test"))?;
 	if !run.success() {
 		return Err(E::error("brut failed when generating output for the added test"));
 	}
 	let desired = run.stdout;
-	add_test(&input, &desired)?;
+	add_test(&input, &desired).await?;
 	Ok(())
 }
 
-pub fn add_test(input: &str, output: &str) -> R<()> {
+pub async fn add_test(input: &str, output: &str) -> R<()> {
 	let dir = crate::dir::custom_tests()?;
-	block_on(util::fs_create_dir_all(&dir))?;
+	util::fs_create_dir_all(&dir).await?;
 	let used = std::fs::read_dir(&dir)
 		.wrap("failed to read tests directory")?
 		.map(|der| {
@@ -196,9 +197,11 @@ pub fn add_test(input: &str, output: &str) -> R<()> {
 		.filter_map(|o| o)
 		.collect::<Vec<_>>();
 	let id = crate::util::mex(1, used);
-	block_on(util::fs_write(&dir.join(format!("{}.in", id)), input))?;
-	block_on(util::fs_write(&dir.join(format!("{}.out", id)), output))?;
-	block_on(crate::test::view())?;
+	let in_path = dir.join(format!("{}.in", id));
+	let out_path = dir.join(format!("{}.out", id));
+	util::fs_write(&in_path, input).await?;
+	util::fs_write(&out_path, output).await?;
+	crate::test::view().await?;
 	Ok(())
 }
 

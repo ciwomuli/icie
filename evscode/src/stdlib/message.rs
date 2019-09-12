@@ -4,7 +4,7 @@
 //! At the bottom of the message, the extension name will be displayed.
 //! [Markdown links](https://github.com/adam-p/markdown-here/wiki/Markdown-Cheatsheet#links) will be parsed and displayed as links.
 
-use crate::{future2::Pong, internal::executor::send_object};
+use crate::{future::Pong, internal::executor::send_object};
 use std::iter::{Chain, Empty, Once};
 
 /// Action button that will appear on a message.
@@ -101,7 +101,7 @@ pub struct Message {
 
 impl Message {
 	/// Create a new builder to configure the message.
-	pub fn new(message: &str) -> Builder<Empty<Action>> {
+	pub fn new<'a>(message: &'a str) -> Builder<'a, Empty<Action>> {
 		Builder { message, kind: "info", modal: false, items: std::iter::empty() }
 	}
 }

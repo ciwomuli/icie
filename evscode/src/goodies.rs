@@ -5,7 +5,7 @@ pub mod webview_resultmap;
 pub mod webview_singleton;
 
 /// Handle to a webview that exists in some sort of collection and may be used by multiple threads.
-pub type WebviewHandle = std::sync::Arc<std::sync::Mutex<crate::Webview>>;
+pub type WebviewHandle = std::sync::Arc<futures::lock::Mutex<crate::Webview>>;
 
 pub use stacked_status::StackedStatus;
 pub use webview_resultmap::WebviewResultmap;

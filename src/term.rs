@@ -61,7 +61,7 @@ impl External {
 			.stderr(Stdio::piped())
 			.spawn()
 			.wrap(format!("failed to launch external terminal {:?}", program))?;
-		evscode::runtime::spawn(move || {
+		evscode::runtime::spawn_async(async move {
 			let out = kid.wait_with_output().wrap(format!("waiting for external terminal {:?} failed", program))?;
 			if !out.status.success() {
 				E::error(format!(

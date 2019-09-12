@@ -6,7 +6,7 @@
 //! const DEBUGGER_LAUNCH_COUNT: State<i64> = State::new("debugger-launch-count", Scope::Global);
 //! ```
 
-use crate::{future2::Pong, internal::executor::send_object, marshal::Marshal, E, R};
+use crate::{future::Pong, internal::executor::send_object, marshal::Marshal, E, R};
 use std::marker::PhantomData;
 
 /// Scope of the stored values.

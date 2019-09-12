@@ -1,6 +1,6 @@
 //! Selecting one or some of the given options.
 
-use crate::{future2::Pong, internal::executor::send_object};
+use crate::{future::Pong, internal::executor::send_object};
 use std::iter::{Chain, Empty, Once};
 
 /// Builder object for an item that can be selected.

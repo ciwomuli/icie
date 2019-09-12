@@ -1,6 +1,6 @@
 //! Input boxes displayed at the top of the editor.
 
-use crate::{future2::Pong, internal::executor::send_object};
+use crate::{future::Pong, internal::executor::send_object};
 
 /// Builder for configurating input boxes. Use [`InputBox::new`] to create.
 #[must_use]

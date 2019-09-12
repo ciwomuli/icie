@@ -1,6 +1,6 @@
 //! Extension metadata types.
 
-use crate::{config::ErasedConfig, future2::BoxedFuture, R};
+use crate::{config::ErasedConfig, future::BoxedFuture, R};
 use json::JsonValue;
 use std::fmt::{self, Write};
 

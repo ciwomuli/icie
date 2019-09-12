@@ -1,6 +1,7 @@
-use evscode::{error::ResultExt, R};
+use evscode::{error::ResultExt, E, R};
+use futures::channel::oneshot;
 use std::{
-	io::{self, Read, Write}, path::PathBuf, process::{Command, ExitStatus, Stdio}, thread::{self, JoinHandle}, time::{Duration, Instant}
+	io::{self, Read, Write}, path::PathBuf, process::{Command, ExitStatus, Stdio}, time::{Duration, Instant}
 };
 use wait_timeout::ChildExt;
 
@@ -37,7 +38,7 @@ impl Executable {
 		Executable { path }
 	}
 
-	pub fn run(&self, input: &str, args: &[&str], environment: &Environment) -> R<Run> {
+	pub async fn run(&self, input: &str, args: &[&str], environment: &Environment) -> R<Run> {
 		let mut cmd = Command::new(&self.path);
 		cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).args(args);
 		let t1 = Instant::now();
@@ -58,8 +59,14 @@ impl Executable {
 		};
 		let t2 = Instant::now();
 		Ok(Run {
-			stdout: kid_stdout.join().unwrap().wrap(format!("could not extract stdout of process of {:?}", self.path))?,
-			stderr: kid_stderr.join().unwrap().wrap(format!("could not extract stderr of process of {:?}", self.path))?,
+			stdout: kid_stdout
+				.await
+				.unwrap()
+				.map_err(|e| E::from_std(e).context(format!("could not extract stdout of process of {:?}", self.path)))?,
+			stderr: kid_stderr
+				.await
+				.unwrap()
+				.map_err(|e| E::from_std(e).context(format!("could not extract stderr of process of {:?}", self.path)))?,
 			status,
 			exit_kind,
 			time: t2 - t1,
@@ -67,10 +74,16 @@ impl Executable {
 	}
 }
 
-fn capture(mut r: impl Read+Send+'static) -> JoinHandle<io::Result<String>> {
-	thread::spawn(move || {
+fn capture(mut r: impl Read+Send+'static) -> oneshot::Receiver<io::Result<String>> {
+	let (tx, rx) = oneshot::channel();
+	evscode::runtime::spawn_async(async move {
 		let mut buf = String::new();
-		r.read_to_string(&mut buf)?;
-		Ok(buf)
-	})
+		tx.send(match r.read_to_string(&mut buf) {
+			Ok(_) => Ok(buf),
+			Err(e) => Err(e),
+		})
+		.unwrap();
+		Ok(())
+	});
+	rx
 }

@@ -1,6 +1,6 @@
 //! Dialog for selecting files or directories.
 
-use crate::{future2::Pong, internal::executor::send_object};
+use crate::{future::Pong, internal::executor::send_object};
 use json::{object, JsonValue};
 use std::{
 	collections::HashMap, marker::PhantomData, path::{Path, PathBuf}

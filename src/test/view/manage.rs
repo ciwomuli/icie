@@ -6,7 +6,7 @@ use crate::{
 use evscode::{
 	error::{cancel_on, ResultExt}, goodies::{webview_resultmap::Computation, WebviewHandle}, Webview, WebviewResultmap, E, R
 };
-use futures::{executor::block_on, StreamExt};
+use futures::{future::BoxFuture, StreamExt};
 use std::{
 	fs, future::Future, path::{Path, PathBuf}, pin::Pin
 };
@@ -27,8 +27,8 @@ impl Computation for TestViewLogic {
 	type K = Option<PathBuf>;
 	type V = Report;
 
-	fn compute(&self, source: &Option<PathBuf>) -> R<Report> {
-		Ok(Report { runs: block_on(test::run(source))? })
+	fn compute<'a>(&'a self, source: &'a Option<PathBuf>) -> BoxFuture<'a, R<Report>> {
+		Box::pin(async move { Ok(Report { runs: test::run(source).await? }) })
 	}
 
 	fn create_empty_webview(&self, source: &Option<PathBuf>) -> R<Webview> {
@@ -37,60 +37,65 @@ impl Computation for TestViewLogic {
 		Ok(webview)
 	}
 
-	fn update(&self, _: &Option<PathBuf>, report: &Report, webview: &Webview) -> R<()> {
-		webview.set_html(block_on(render(&report.runs))?);
-		webview.reveal(2, true);
-		if *SCROLL_TO_FIRST_FAILED.get() {
-			webview.post_message(json::object! {
-				"tag" => "scroll_to_wa",
-			});
-		}
-		Ok(())
+	fn update<'a>(&'a self, _: &'a Option<PathBuf>, report: &'a Report, webview: &'a Webview) -> BoxFuture<'a, R<()>> {
+		Box::pin(async move {
+			webview.set_html(render(&report.runs).await?);
+			webview.reveal(2, true);
+			if *SCROLL_TO_FIRST_FAILED.get() {
+				webview.post_message(json::object! {
+					"tag" => "scroll_to_wa",
+				});
+			}
+			Ok(())
+		})
 	}
 
 	fn manage(&self, source: &Option<PathBuf>, _: &Report, webview: WebviewHandle) -> R<Pin<Box<dyn Future<Output=R<()>>+Send+'static>>> {
-		let mut stream = {
-			let webview = webview.lock().unwrap();
-			cancel_on(webview.listener(), webview.disposer()).boxed()
-		};
 		let source = source.clone();
-		Ok(Box::pin((async move || {
-			let source = source;
+		Ok(Box::pin(async move {
+			let mut stream = {
+				let webview = webview.lock().await;
+				cancel_on(webview.listener(), webview.disposer()).boxed()
+			};
 			while let Some(note) = stream.next().await {
 				let note = note?;
 				match note["tag"].as_str() {
-					Some("trigger_rr") => evscode::runtime::spawn({
-						let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
+					Some("trigger_rr") => evscode::runtime::spawn_async({
 						let source = source.clone();
-						move || crate::debug::rr(in_path, source)
+						async move {
+							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
+							crate::debug::rr(in_path, source)
+						}
 					}),
-					Some("trigger_gdb") => evscode::runtime::spawn({
-						let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
+					Some("trigger_gdb") => evscode::runtime::spawn_async({
 						let source = source.clone();
-						move || crate::debug::gdb(in_path, source)
+						async move {
+							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
+							crate::debug::gdb(in_path, source)
+						}
 					}),
-					Some("new_test") => evscode::runtime::spawn_async((async move || {
+					Some("new_test") => evscode::runtime::spawn_async(async move {
 						crate::test::add(note["input"].as_str().unwrap(), note["desired"].as_str().unwrap()).await
-					})()),
-					Some("set_alt") => evscode::runtime::spawn({
-						TELEMETRY.test_alternative_add.spark();
+					}),
+					Some("set_alt") => evscode::runtime::spawn_async({
 						let source = source.clone();
-						move || {
+						async move {
+							TELEMETRY.test_alternative_add.spark();
 							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
 							let out = note["out"].as_str().unwrap();
 							fs::write(in_path.with_extension("alt.out"), format!("{}\n", out.trim()))
 								.wrap("failed to save alternative out as a file")?;
-							COLLECTION.get_force(source)?;
+							COLLECTION.get_force(source).await?;
 							Ok(())
 						}
 					}),
-					Some("del_alt") => evscode::runtime::spawn({
-						TELEMETRY.test_alternative_delete.spark();
+					Some("del_alt") => evscode::runtime::spawn_async({
 						let source = source.clone();
-						move || {
+						async move {
+							TELEMETRY.test_alternative_delete.spark();
 							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
 							fs::remove_file(in_path.with_extension("alt.out")).wrap("failed to remove alternative out file")?;
-							COLLECTION.get_force(source)?;
+							COLLECTION.get_force(source).await?;
 							Ok(())
 						}
 					}),
@@ -101,7 +106,7 @@ impl Computation for TestViewLogic {
 					Some("action_notice") => SKILL_ACTIONS.add_use().await,
 					Some("eval_req") => {
 						let webview = webview.clone();
-						evscode::runtime::spawn_async((async move || {
+						evscode::runtime::spawn_async(async move {
 							let _status = crate::STATUS.push("Evaluating");
 							let id = note["id"].as_i64().unwrap();
 							let input = note["input"].as_str().unwrap();
@@ -109,10 +114,10 @@ impl Computation for TestViewLogic {
 								if brut.exists() {
 									TELEMETRY.test_eval.spark();
 									let brut = build(brut, &Codegen::Release, false).await?;
-									let run = brut.run(input, &[], &Environment { time_limit: time_limit() })?;
+									let run = brut.run(input, &[], &Environment { time_limit: time_limit() }).await?;
 									if run.success() {
-										add_test(input, &run.stdout)?;
-										let webview = webview.lock().unwrap();
+										add_test(input, &run.stdout).await?;
+										let webview = webview.lock().await;
 										webview.post_message(json::object! {
 											"tag" => "eval_resp",
 											"id" => id,
@@ -124,13 +129,13 @@ impl Computation for TestViewLogic {
 								}
 							}
 							Ok(())
-						})());
+						});
 					},
 					_ => return Err(E::error(format!("invalid webview message `{}`", note.dump()))),
 				}
 			}
 			Ok(())
-		})()))
+		}))
 	}
 }
 

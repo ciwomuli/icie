@@ -1,10 +1,11 @@
 use crate::ci::exec::{Environment, Executable};
 use evscode::{error::ResultExt, R};
+use futures::future::BoxFuture;
 use std::{fmt, io::Write};
 use tempfile::NamedTempFile;
 
 pub trait Checker: fmt::Debug {
-	fn judge(&self, input: &str, desired: &str, out: &str) -> R<bool>;
+	fn judge<'a>(&'a self, input: &'a str, desired: &'a str, out: &'a str) -> BoxFuture<'a, R<bool>>;
 }
 
 #[derive(Debug)]
@@ -16,8 +17,8 @@ pub struct Task {
 #[derive(Debug)]
 pub struct FreeWhitespaceChecker;
 impl Checker for FreeWhitespaceChecker {
-	fn judge(&self, _input: &str, desired: &str, out: &str) -> R<bool> {
-		Ok(self.equal_bew(desired, out))
+	fn judge<'a>(&'a self, _input: &'a str, desired: &'a str, out: &'a str) -> BoxFuture<'a, R<bool>> {
+		Box::pin(async move { Ok(self.equal_bew(desired, out)) })
 	}
 }
 impl FreeWhitespaceChecker {
@@ -61,18 +62,23 @@ pub struct ExecChecker {
 }
 
 impl Checker for ExecChecker {
-	fn judge(&self, input: &str, desired: &str, out: &str) -> R<bool> {
-		let mut input_file = NamedTempFile::new().wrap("failed to create temporary input file")?;
-		let mut desired_file = NamedTempFile::new().wrap("failed to create temporary correct-output file")?;
-		let mut out_file = NamedTempFile::new().wrap("failed to create temporary output file")?;
-		input_file.write_all(input.as_bytes()).wrap("failed to fill temporary input file")?;
-		desired_file.write_all(desired.as_bytes()).wrap("failed to fill temporary correct-output file")?;
-		out_file.write_all(out.as_bytes()).wrap("failed to fill temporary output file")?;
-		let run = self.executable.run(
-			"",
-			&[input_file.path().to_str().unwrap(), out_file.path().to_str().unwrap(), desired_file.path().to_str().unwrap()],
-			&self.environment,
-		)?;
-		Ok(run.success())
+	fn judge<'a>(&'a self, input: &'a str, desired: &'a str, out: &'a str) -> BoxFuture<'a, R<bool>> {
+		Box::pin(async move {
+			let mut input_file = NamedTempFile::new().wrap("failed to create temporary input file")?;
+			let mut desired_file = NamedTempFile::new().wrap("failed to create temporary correct-output file")?;
+			let mut out_file = NamedTempFile::new().wrap("failed to create temporary output file")?;
+			input_file.write_all(input.as_bytes()).wrap("failed to fill temporary input file")?;
+			desired_file.write_all(desired.as_bytes()).wrap("failed to fill temporary correct-output file")?;
+			out_file.write_all(out.as_bytes()).wrap("failed to fill temporary output file")?;
+			let run = self
+				.executable
+				.run(
+					"",
+					&[input_file.path().to_str().unwrap(), out_file.path().to_str().unwrap(), desired_file.path().to_str().unwrap()],
+					&self.environment,
+				)
+				.await?;
+			Ok(run.success())
+		})
 	}
 }

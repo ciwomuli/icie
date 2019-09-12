@@ -1,14 +1,16 @@
-use crate::{error::Severity, meta::ConfigEntry, runtime::spawn_async, stdlib::message::Action, E, R};
+use crate::{error::Severity, future::BoxedFuture, meta::ConfigEntry, runtime::spawn_async, stdlib::message::Action, E, R};
 use arc_swap::ArcSwapOption;
-use futures::{executor::block_on, FutureExt};
+use futures::{stream::StreamExt, FutureExt};
 use json::{object, JsonValue};
 use lazy_static::lazy_static;
 use log::LevelFilter;
 use std::{
-	collections::{HashMap, VecDeque}, io::BufRead, path::PathBuf, sync::{
-		atomic::{AtomicU64, Ordering}, Arc, Mutex
+	collections::{HashMap, VecDeque}, path::PathBuf, ptr::null_mut, sync::{
+		atomic::{AtomicPtr, AtomicU64, Ordering}, Arc, Mutex
 	}, task::Waker
 };
+use tokio::io::{stdin, AsyncBufReadExt, BufReader};
+use tokio_executor::current_thread::{CurrentThread, Handle};
 
 pub fn execute(pkg: &'static mut crate::meta::Package) {
 	set_panic_hook();
@@ -16,7 +18,21 @@ pub fn execute(pkg: &'static mut crate::meta::Package) {
 	log::set_boxed_logger(Box::new(logger)).expect("evscode::execute failed to set logger");
 	log::set_max_level(LevelFilter::Trace);
 	CONFIG_ENTRIES.store(Some(Arc::new(&pkg.configuration)));
-	for line in std::io::stdin().lock().lines() {
+	let mut runtime = CurrentThread::new();
+	RUNTIME_HANDLE.store(Box::leak(Box::new(runtime.handle())) as *mut Handle, Ordering::SeqCst);
+	let on_activate = pkg.on_activate.take();
+	let on_deactivate = pkg.on_deactivate.take();
+	runtime.spawn(comms_loop(pkg, on_activate, on_deactivate));
+	runtime.run().expect("executor run error");
+}
+
+async fn comms_loop(
+	pkg: &'static crate::meta::Package,
+	mut on_activate: Option<BoxedFuture<'static, R<()>>>,
+	mut on_deactivate: Option<BoxedFuture<'static, R<()>>>,
+) {
+	let mut lines = BufReader::new(stdin()).lines();
+	while let Some(line) = lines.next().await {
 		let line = line.expect("evscode::execute line read errored");
 		let mut impulse = json::parse(&line).expect("evscode::execute malformed json");
 		if impulse["tag"] == "async" {
@@ -27,6 +43,15 @@ pub fn execute(pkg: &'static mut crate::meta::Package) {
 				entry.0 = Some(value);
 				if let Some(waker) = entry.1.take() {
 					waker.wake();
+				}
+			} else {
+				drop(lck2);
+				let mut lck3 = ASYNC_STREAMS.lock().expect("evscode::execute ASYNC_STREAMS PoisonError");
+				if let Some(entry) = lck3.get_mut(&aid) {
+					entry.0.push_front(value);
+					if let Some(waker) = entry.1.as_ref() {
+						waker.wake_by_ref();
+					}
 				}
 			}
 		} else if impulse["tag"] == "trigger" {
@@ -49,16 +74,16 @@ pub fn execute(pkg: &'static mut crate::meta::Package) {
 				}
 			}
 			if !errors.is_empty() {
-				error_show(crate::E::error(errors.join(", ")).context("some configuration entries are invalid, falling back to defaults"));
+				crate::E::error(errors.join(", ")).context("some configuration entries are invalid, falling back to defaults").emit();
 			}
 		} else if impulse["tag"] == "meta" {
 			*WORKSPACE_ROOT.lock().unwrap() = impulse["workspace"].as_str().map(PathBuf::from);
 			*EXTENSION_ROOT.lock().unwrap() = Some(PathBuf::from(impulse["extension"].as_str().unwrap()));
-			if let Some(on_activate) = pkg.on_activate.take() {
+			if let Some(on_activate) = on_activate.take() {
 				spawn_async(on_activate);
 			}
 		} else if impulse["tag"] == "dispose" {
-			if let Some(on_deactivate) = pkg.on_deactivate.take() {
+			if let Some(on_deactivate) = on_deactivate.take() {
 				spawn_async(on_deactivate.map(|r| {
 					if let Err(e) = r {
 						error_show(e);
@@ -78,16 +103,16 @@ pub fn execute(pkg: &'static mut crate::meta::Package) {
 	}
 }
 
+static RUNTIME_HANDLE: AtomicPtr<Handle> = AtomicPtr::new(null_mut());
+
+pub(crate) fn runtime_handle() -> &'static Handle {
+	// Safe, because we only write to RUNTIME_HANDLE once and the pointer comes from Box::leak.
+	unsafe { &*(RUNTIME_HANDLE.load(Ordering::SeqCst) as *const Handle) }
+}
+
 pub fn send_object(obj: json::JsonValue) {
 	let fmt = json::stringify(obj);
 	println!("{}", fmt);
-}
-
-pub(crate) fn spawn(f: impl FnOnce() -> R<()>+Send+'static) {
-	std::thread::spawn(move || match f() {
-		Ok(()) => (),
-		Err(e) => error_show(e),
-	});
 }
 
 pub fn error_show(e: crate::E) {
@@ -116,22 +141,27 @@ pub fn error_show(e: crate::E) {
 			Severity::Warning => true,
 			Severity::Workflow => false,
 		};
-		let message =
-			format!("{}{}", e.human(), if should_suggest_report { "; [report issue?](https://github.com/pustaczek/icie/issues)" } else { "" });
-		let mut msg = crate::Message::new(&message).error().items(e.actions.iter().enumerate().map(|(i, action)| Action {
-			id: i.to_string(),
-			title: &action.title,
-			is_close_affordance: false,
-		}));
-		if let Severity::Warning = e.severity {
-			msg = msg.warning();
-		}
-		let choice = block_on(msg.show());
-		if let Some(choice) = choice {
-			let i: usize = choice.parse().unwrap();
-			let action = e.actions.into_iter().nth(i).unwrap();
-			spawn_async(action.trigger);
-		}
+		spawn_async(async move {
+			let message =
+				format!("{}{}", e.human(), if should_suggest_report { "; [report issue?](https://github.com/pustaczek/icie/issues)" } else { "" });
+			let items = e
+				.actions
+				.iter()
+				.enumerate()
+				.map(|(i, action)| Action { id: i.to_string(), title: &action.title, is_close_affordance: false })
+				.collect::<Vec<_>>();
+			let mut msg = crate::Message::new(&message).error().items(items);
+			if let Severity::Warning = e.severity {
+				msg = msg.warning();
+			}
+			let choice = msg.show().await;
+			if let Some(choice) = choice {
+				let i: usize = choice.parse().unwrap();
+				let action = e.actions.into_iter().nth(i).unwrap();
+				action.trigger.await?;
+			}
+			Ok(())
+		});
 	}
 }
 

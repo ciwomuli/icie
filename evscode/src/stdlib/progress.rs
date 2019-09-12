@@ -1,7 +1,7 @@
 //! Progress bars, both finite and infinite.
 
 use crate::{
-	future2::Pong, internal::executor::{send_object, HANDLE_FACTORY}
+	future::Pong, internal::executor::{send_object, HANDLE_FACTORY}
 };
 use std::sync::{
 	atomic::{AtomicBool, Ordering}, Mutex

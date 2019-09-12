@@ -11,7 +11,7 @@ use unijudge::{
 async fn send() -> R<()> {
 	let _status = crate::STATUS.push("Submitting");
 	TELEMETRY.submit_f12.spark();
-	let (_, report) = crate::test::view::manage::COLLECTION.get_force(None)?;
+	let (_, report) = crate::test::view::manage::COLLECTION.get_force(None).await?;
 	if report.runs.iter().any(|test| !test.success()) {
 		TELEMETRY.submit_failtest.spark();
 		return Err(E::error("some tests failed, submit aborted").workflow_error());

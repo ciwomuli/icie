@@ -4,7 +4,7 @@
 //! directly. See also the [official webview tutorial](https://code.visualstudio.com/api/extension-guides/webview).
 
 use crate::{
-	future2::{Pong, PongStream}, internal::executor::{send_object, HANDLE_FACTORY}, Column
+	future::{Pong, PongStream}, internal::executor::{send_object, HANDLE_FACTORY}, Column
 };
 use futures::Stream;
 use json::JsonValue;

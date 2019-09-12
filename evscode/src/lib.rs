@@ -38,13 +38,13 @@
 //!
 //! The built extensions will work on Linux, and compilation also requires Linux. First, make sure npm and rsync are installed. Then, run `cargo run` to launch a debug session. To package an extension, run `cargo run --release -- --package`(requires that [vsce](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#installation) is installed). To publish an extension, [log in to vsce](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#publishing-extensions) and run `cargo run --release -- --publish`.
 
-#![feature(associated_type_defaults, async_closure, const_fn, try_trait)]
-#![allow(clippy::new_ret_no_self, clippy::redundant_closure_call)]
+#![feature(associated_type_defaults, const_fn, try_trait)]
+#![allow(clippy::new_ret_no_self)]
 #![deny(missing_docs)]
 
 pub mod config;
 pub mod error;
-pub(crate) mod future2;
+pub(crate) mod future;
 pub mod goodies;
 #[doc(hidden)]
 pub mod internal;

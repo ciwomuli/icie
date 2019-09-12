@@ -1,5 +1,5 @@
-#![feature(async_closure, const_fn, exhaustive_patterns, never_type, proc_macro_hygiene, specialization, todo_macro, try_blocks)]
-#![allow(clippy::extra_unused_lifetimes, clippy::redundant_closure_call, clippy::unit_arg)]
+#![feature(const_fn, exhaustive_patterns, never_type, proc_macro_hygiene, specialization, todo_macro, try_blocks)]
+#![allow(clippy::extra_unused_lifetimes, clippy::unit_arg)]
 
 mod auth;
 mod build;

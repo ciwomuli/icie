@@ -2,7 +2,7 @@ use crate::internal::executor::{ASYNC_ID_FACTORY, ASYNC_OPS2, ASYNC_STREAMS};
 use futures::Stream;
 use json::JsonValue;
 use std::{
-	collections::hash_map::Entry, future::Future, pin::Pin, task::{Context, Poll}
+	collections::{hash_map::Entry, VecDeque}, future::Future, pin::Pin, task::{Context, Poll}
 };
 
 pub type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output=T>+Send+'a>>;
@@ -30,7 +30,7 @@ pub struct PongStream {
 impl PongStream {
 	pub fn new() -> PongStream {
 		let id = ASYNC_ID_FACTORY.generate();
-		ASYNC_OPS2.lock().unwrap().insert(id, (None, None));
+		ASYNC_STREAMS.lock().unwrap().insert(id, (VecDeque::new(), None));
 		PongStream { id }
 	}
 

@@ -62,13 +62,15 @@ fn run_thread(ins: Vec<PathBuf>, task: ci::task::Task, solution: ci::exec::Execu
 				let out_path = in_path.with_extension("out");
 				let alt_path = in_path.with_extension("alt.out");
 				let input = util::fs_read_to_string(&in_path).await?;
-				let output = match std::fs::read_to_string(&out_path) {
-					Ok(output) => Some(output),
+				let output = match tokio::fs::read(&out_path).await.map(String::from_utf8) {
+					Ok(Ok(output)) => Some(output),
+					Ok(Err(e)) => return Err(E::from_std(e).context(format!("test output for {} is not valid utf8", in_path.display()))),
 					Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => None,
 					Err(e) => return Err(E::from_std(e).context(format!("failed to read test out {}", out_path.display()))),
 				};
 				let alt = if alt_path.exists() { Some(util::fs_read_to_string(&alt_path).await?) } else { None };
 				let outcome = ci::test::simple_test(&solution, &input, output.as_ref().map(String::as_str), alt.as_ref().map(|p| p.as_str()), &task)
+					.await
 					.map_err(|e| e.context("failed to run test"))?;
 				let run = TestRun { in_path, out_path, outcome };
 				if tx.send(Ok(run)).await.is_err() {
@@ -90,14 +92,14 @@ fn run_thread(ins: Vec<PathBuf>, task: ci::task::Task, solution: ci::exec::Execu
 #[evscode::command(title = "ICIE Open Test View", key = "alt+0")]
 pub async fn view() -> R<()> {
 	TELEMETRY.test_alt0.spark();
-	view::manage::COLLECTION.get_force(None)?;
+	view::manage::COLLECTION.get_force(None).await?;
 	Ok(())
 }
 
 #[evscode::command(title = "ICIE Open Test View (current editor)", key = "alt+\\ alt+0")]
 async fn view_current() -> R<()> {
 	TELEMETRY.test_current.spark();
-	view::manage::COLLECTION.get_force(util::active_tab().await?)?;
+	view::manage::COLLECTION.get_force(util::active_tab().await?).await?;
 	Ok(())
 }
 
@@ -110,15 +112,15 @@ async fn add(input: &str, desired: &str) -> R<()> {
 	let out_path = tests.join(format!("{}.out", id));
 	util::fs_write(&in_path, input).await?;
 	util::fs_write(&out_path, desired).await?;
-	view::manage::COLLECTION.update_all();
+	view::manage::COLLECTION.update_all().await;
 	Ok(())
 }
 
 #[evscode::command(title = "ICIE New Test", key = "alt+-")]
 pub async fn input() -> evscode::R<()> {
 	TELEMETRY.test_input.spark();
-	let view = if let Some(view) = view::manage::COLLECTION.find_active() { view } else { view::manage::COLLECTION.get_lazy(None)? };
-	let view = view.lock().unwrap();
+	let view = if let Some(view) = view::manage::COLLECTION.find_active().await { view } else { view::manage::COLLECTION.get_lazy(None).await? };
+	let view = view.lock().await;
 	// FIXME: Despite this reveal, VS Code does not focus the webview hard enough for a .focus() in the JS code to work.
 	view.reveal(2, false);
 	view::manage::touch_input(&*view);
