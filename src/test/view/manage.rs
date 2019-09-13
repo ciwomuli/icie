@@ -114,7 +114,8 @@ impl Computation for TestViewLogic {
 								if brut.exists() {
 									TELEMETRY.test_eval.spark();
 									let brut = build(brut, &Codegen::Release, false).await?;
-									let run = brut.run(input, &[], &Environment { time_limit: time_limit() }).await?;
+									let environment = Environment { time_limit: time_limit() };
+									let run = brut.run(input, &[], &environment).await?;
 									if run.success() {
 										add_test(input, &run.stdout).await?;
 										let webview = webview.lock().await;

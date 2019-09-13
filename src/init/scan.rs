@@ -18,7 +18,7 @@ pub async fn fetch_contests() -> Vec<(Arc<net::Session>, BoxedContestDetails, &'
 				domain,
 				try {
 					let _status = crate::STATUS.push(format!("Connecting {}", domain));
-					let sess = Arc::new(Session::connect(domain, backend.backend)?);
+					let sess = Arc::new(Session::connect(domain, backend.backend).await?);
 					let _status = crate::STATUS.push(format!("Fetching {}", domain));
 					let contests = sess.run(|backend, sess| backend.contests(sess)).await?;
 					(sess, contests, *backend)

@@ -9,8 +9,9 @@ use std::{
 		atomic::{AtomicPtr, AtomicU64, Ordering}, Arc, Mutex
 	}, task::Waker
 };
-use tokio::io::{stdin, AsyncBufReadExt, BufReader};
-use tokio_executor::current_thread::{CurrentThread, Handle};
+use tokio::{
+	io::{stdin, AsyncBufReadExt, BufReader}, runtime::current_thread
+};
 
 pub fn execute(pkg: &'static mut crate::meta::Package) {
 	set_panic_hook();
@@ -18,8 +19,8 @@ pub fn execute(pkg: &'static mut crate::meta::Package) {
 	log::set_boxed_logger(Box::new(logger)).expect("evscode::execute failed to set logger");
 	log::set_max_level(LevelFilter::Trace);
 	CONFIG_ENTRIES.store(Some(Arc::new(&pkg.configuration)));
-	let mut runtime = CurrentThread::new();
-	RUNTIME_HANDLE.store(Box::leak(Box::new(runtime.handle())) as *mut Handle, Ordering::SeqCst);
+	let mut runtime = current_thread::Runtime::new().unwrap();
+	RUNTIME_HANDLE.store(Box::leak(Box::new(runtime.handle())) as *mut current_thread::Handle, Ordering::SeqCst);
 	let on_activate = pkg.on_activate.take();
 	let on_deactivate = pkg.on_deactivate.take();
 	runtime.spawn(comms_loop(pkg, on_activate, on_deactivate));
@@ -103,11 +104,11 @@ async fn comms_loop(
 	}
 }
 
-static RUNTIME_HANDLE: AtomicPtr<Handle> = AtomicPtr::new(null_mut());
+static RUNTIME_HANDLE: AtomicPtr<current_thread::Handle> = AtomicPtr::new(null_mut());
 
-pub(crate) fn runtime_handle() -> &'static Handle {
+pub(crate) fn runtime_handle() -> &'static current_thread::Handle {
 	// Safe, because we only write to RUNTIME_HANDLE once and the pointer comes from Box::leak.
-	unsafe { &*(RUNTIME_HANDLE.load(Ordering::SeqCst) as *const Handle) }
+	unsafe { &*(RUNTIME_HANDLE.load(Ordering::SeqCst) as *const current_thread::Handle) }
 }
 
 pub fn send_object(obj: json::JsonValue) {

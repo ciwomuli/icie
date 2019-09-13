@@ -2,7 +2,8 @@ use crate::{
 	dir, init::help_init, manifest::Manifest, net::{self, require_task}, telemetry::TELEMETRY, test, util::{self, plural}
 };
 use evscode::{E, R};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::timer::delay;
 use unijudge::{
 	boxed::{BoxedContest, BoxedTask}, Backend, RejectionCause, Resource
 };
@@ -40,7 +41,7 @@ async fn send_passed() -> R<()> {
 	let (url, backend) = net::interpret_url(url)?;
 	let url = require_task::<BoxedContest, BoxedTask>(url)?;
 	let Resource::Task(task) = url.resource;
-	let sess = net::Session::connect(&url.domain, backend.backend)?;
+	let sess = net::Session::connect(&url.domain, backend.backend).await?;
 	let langs = {
 		let _status = crate::STATUS.push("Querying languages");
 		sess.run(|backend, sess| backend.task_languages(sess, &task)).await?
@@ -76,7 +77,7 @@ async fn track(sess: crate::net::Session, url: &unijudge::boxed::BoxedTask, id: 
 				log::debug!("submission {} not found on status page, {} left", id, plural(not_seen_retry_limit, "retry", "retries"));
 				let _status = crate::STATUS.push("Tracking (retrying...)");
 				not_seen_retry_limit -= 1;
-				std::thread::sleep(TRACK_NOT_SEEN_RETRY_DELAY);
+				delay(Instant::now() + TRACK_NOT_SEEN_RETRY_DELAY).await;
 				continue;
 			},
 			None => return Err(E::error(format!("submission {} not found on status page", id))),
@@ -91,7 +92,7 @@ async fn track(sess: crate::net::Session, url: &unijudge::boxed::BoxedTask, id: 
 			progress.message(fmt_verdict(&submission.verdict));
 			last_verdict = Some(submission.verdict);
 		}
-		std::thread::sleep(TRACK_DELAY);
+		delay(Instant::now() + TRACK_DELAY).await;
 	};
 	progress.end();
 	let message = fmt_verdict(&verdict);

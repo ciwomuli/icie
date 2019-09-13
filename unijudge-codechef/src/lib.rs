@@ -1,9 +1,10 @@
 #![feature(try_blocks)]
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use unijudge::{
-	backtrace::Backtrace, debris::{Context, Document, Find}, json, reqwest::{cookie_store::Cookie, Client, StatusCode, Url}, ContestDetails, Error, Language, RejectionCause, Resource, Result, Statement, Submission, TaskDetails, Verdict
+	backtrace::Backtrace, debris::{Context, Document, Find}, http::Client, json, reqwest::{cookie_store::Cookie, StatusCode, Url}, ContestDetails, Error, Language, RejectionCause, Resource, Result, Statement, Submission, TaskDetails, Verdict
 };
 
 pub struct CodeChef;
@@ -32,6 +33,7 @@ pub struct CachedAuth {
 	c_sess: Cookie<'static>,
 }
 
+#[async_trait]
 impl unijudge::Backend for CodeChef {
 	type CachedAuth = CachedAuth;
 	type Contest = Contest;
@@ -58,7 +60,7 @@ impl unijudge::Backend for CodeChef {
 		Session { client, username: Mutex::new(None) }
 	}
 
-	fn auth_cache(&self, session: &Self::Session) -> Result<Option<Self::CachedAuth>> {
+	async fn auth_cache(&self, session: &Self::Session) -> Result<Option<Self::CachedAuth>> {
 		let username = match session.username.lock().map_err(|_| Error::StateCorruption)?.clone() {
 			Some(username) => username,
 			None => return Ok(None),
@@ -76,7 +78,7 @@ impl unijudge::Backend for CodeChef {
 		unijudge::deserialize_auth(data)
 	}
 
-	fn auth_login(&self, session: &Self::Session, username: &str, password: &str) -> Result<()> {
+	async fn auth_login(&self, session: &Self::Session, username: &str, password: &str) -> Result<()> {
 		let mut resp1 = session.client.get("https://www.codechef.com/").send()?;
 		let doc1 = Document::new(&resp1.text()?);
 		let form_build_id = doc1.find("#new-login-form [name=form_build_id]")?.attr("value")?.string();
@@ -102,7 +104,7 @@ impl unijudge::Backend for CodeChef {
 		}
 	}
 
-	fn auth_restore(&self, session: &Self::Session, auth: &Self::CachedAuth) -> Result<()> {
+	async fn auth_restore(&self, session: &Self::Session, auth: &Self::CachedAuth) -> Result<()> {
 		*session.username.lock().map_err(|_| Error::StateCorruption)? = Some(auth.username.clone());
 		let url = "https://www.codechef.com".parse()?;
 		let mut cookies = session.client.cookies().write().map_err(|_| Error::StateCorruption)?;
@@ -118,7 +120,7 @@ impl unijudge::Backend for CodeChef {
 		Some(task.contest.clone())
 	}
 
-	fn task_details(&self, session: &Self::Session, task: &Self::Task) -> Result<TaskDetails> {
+	async fn task_details(&self, session: &Self::Session, task: &Self::Task) -> Result<TaskDetails> {
 		let url: Url = format!("https://www.codechef.com/api/contests/{}/problems/{}", task.contest.as_virt_symbol(), task.task).parse()?;
 		let resp = json::from_resp::<api::Task>(session.client.get(url.clone()).send()?, "/api/contests/{}/problems/{}")?;
 		let statement = Some(self.prepare_statement(&resp.problem_name, resp.body));
@@ -133,7 +135,7 @@ impl unijudge::Backend for CodeChef {
 		})
 	}
 
-	fn task_languages(&self, session: &Self::Session, task: &Self::Task) -> Result<Vec<Language>> {
+	async fn task_languages(&self, session: &Self::Session, task: &Self::Task) -> Result<Vec<Language>> {
 		// Querying languages doesn't require login, in contrast to most other sites.
 		let resp = json::from_resp::<api::Languages>(
 			session.client.get(&format!("https://www.codechef.com/api/ide/{}/languages/{}", task.contest.as_virt_symbol(), task.task)).send()?,
@@ -146,7 +148,7 @@ impl unijudge::Backend for CodeChef {
 			.collect())
 	}
 
-	fn task_submissions(&self, session: &Self::Session, task: &Self::Task) -> Result<Vec<Submission>> {
+	async fn task_submissions(&self, session: &Self::Session, task: &Self::Task) -> Result<Vec<Submission>> {
 		// There is also an API to query a specific submission, but it is not available in other sites and would require refactoring unijudge.
 		// However, using it would possible make things faster and also get rid of the insanity that is querying all these submission lists.
 		let doc = Document::new(
@@ -194,7 +196,7 @@ impl unijudge::Backend for CodeChef {
 			.collect()
 	}
 
-	fn task_submit(&self, session: &Self::Session, task: &Self::Task, language: &Language, code: &str) -> Result<String> {
+	async fn task_submit(&self, session: &Self::Session, task: &Self::Task, language: &Language, code: &str) -> Result<String> {
 		// This seems to work even if submitting as a team, although there are some mild problems with tracking.
 		let mut resp = session
 			.client
@@ -226,7 +228,7 @@ impl unijudge::Backend for CodeChef {
 		"CodeChef"
 	}
 
-	fn contest_tasks(&self, session: &Self::Session, contest: &Self::Contest) -> Result<Vec<Self::Task>> {
+	async fn contest_tasks(&self, session: &Self::Session, contest: &Self::Contest) -> Result<Vec<Self::Task>> {
 		Ok(self.contest_details_ex(session, contest)?.tasks)
 	}
 
@@ -234,11 +236,11 @@ impl unijudge::Backend for CodeChef {
 		format!("https://www.codechef.com/{}", contest.as_virt_symbol())
 	}
 
-	fn contest_title(&self, session: &Self::Session, contest: &Self::Contest) -> Result<String> {
+	async fn contest_title(&self, session: &Self::Session, contest: &Self::Contest) -> Result<String> {
 		Ok(self.contest_details_ex(session, contest)?.title)
 	}
 
-	fn contests(&self, session: &Self::Session) -> Result<Vec<ContestDetails<Self::Contest>>> {
+	async fn contests(&self, session: &Self::Session) -> Result<Vec<ContestDetails<Self::Contest>>> {
 		let doc = Document::new(&session.client.get("https://www.codechef.com/contests").send()?.text()?);
 		doc.find("#primary-content > .content-wrapper")?
 			// CodeChef does not separate ongoing contests and permanent contests, so we only select the upcoming ones.

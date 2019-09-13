@@ -48,7 +48,8 @@ impl<T: Computation> WebviewResultmap<T> {
 	pub async fn find_active(&self) -> Option<WebviewHandle> {
 		let lck = self.collection.lock().await;
 		for webview in lck.values() {
-			if webview.lock().await.is_active().await {
+			let lock = webview.lock().await;
+			if lock.is_active().await {
 				return Some(webview.clone());
 			}
 		}

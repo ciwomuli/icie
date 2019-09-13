@@ -1,4 +1,4 @@
-#![feature(const_fn, exhaustive_patterns, never_type, proc_macro_hygiene, specialization, todo_macro, try_blocks)]
+#![feature(bind_by_move_pattern_guards, const_fn, exhaustive_patterns, never_type, proc_macro_hygiene, specialization, todo_macro, try_blocks)]
 #![allow(clippy::extra_unused_lifetimes, clippy::unit_arg)]
 
 mod auth;
@@ -44,13 +44,12 @@ evscode::plugin! {
 	telemetry_key: "b05c4c82-d1e6-44f5-aa16-321230ad2475",
 	log_filters: &[
 		("cookie_store", log::LevelFilter::Info),
-		("html5ever", log::LevelFilter::Error),
+		("html5ever", log::LevelFilter::Info),
 		("hyper", log::LevelFilter::Info),
 		("mio", log::LevelFilter::Info),
-		("reqwest", log::LevelFilter::Info),
-		("rustls", log::LevelFilter::Info),
 		("selectors", log::LevelFilter::Info),
-		("tokio_reactor", log::LevelFilter::Info),
+		("reqwest", log::LevelFilter::Info),
+		("tokio_net", log::LevelFilter::Info),
 		("want", log::LevelFilter::Info),
 	],
 }

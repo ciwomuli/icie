@@ -2,21 +2,23 @@ use crate::{
 	auth, telemetry::{self, TELEMETRY}
 };
 use evscode::{error::ResultExt, E, R};
-use reqwest::header::HeaderValue;
-use std::{fmt, future::Future, pin::Pin, thread::sleep, time::Duration};
+use std::{
+	fmt, future::Future, pin::Pin, time::{Duration, Instant}
+};
+use tokio::timer::delay;
 use unijudge::{
-	boxed::{BoxedSession, BoxedURL, DynamicBackend}, Backend, Resource, URL
+	boxed::{BoxedSession, BoxedURL, DynamicBackend}, http::Client, Backend, Resource, URL
 };
 
 const USER_AGENT: &str = concat!("ICIE/", env!("CARGO_PKG_VERSION"), " (+https://github.com/pustaczek/icie)");
 const NETWORK_ERROR_RETRY_LIMIT: usize = 4;
 const NETWORK_ERROR_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-pub static BACKENDS: [BackendMeta; 5] = [
-	BackendMeta::new(&unijudge_atcoder::AtCoder, "C++14 (GCC 5.4.1)", "unijudge_atcoder"),
-	BackendMeta::new(&unijudge_codechef::CodeChef, "C++14(gcc 6.3)", "unijudge_codechef"),
-	BackendMeta::new(&unijudge_codeforces::Codeforces, "GNU G++17 7.3.0", "unijudge_codeforces"),
-	BackendMeta::new(&unijudge_sio2::Sio2, "C++", "unijudge_sio2"),
+pub static BACKENDS: [BackendMeta; 1] = [
+	//	BackendMeta::new(&unijudge_atcoder::AtCoder, "C++14 (GCC 5.4.1)", "unijudge_atcoder"),
+	//	BackendMeta::new(&unijudge_codechef::CodeChef, "C++14(gcc 6.3)", "unijudge_codechef"),
+	//	BackendMeta::new(&unijudge_codeforces::Codeforces, "GNU G++17 7.3.0", "unijudge_codeforces"),
+	//	BackendMeta::new(&unijudge_sio2::Sio2, "C++", "unijudge_sio2"),
 	BackendMeta::new(&unijudge_spoj::SPOJ, "C++14 (clang 8.0)", "unijudge_spoj"),
 ];
 
@@ -57,19 +59,15 @@ pub fn interpret_url(url: &str) -> R<(BoxedURL, &'static BackendMeta)> {
 }
 
 impl Session {
-	pub fn connect(domain: &str, backend: &'static dyn DynamicBackend) -> R<Session> {
+	pub async fn connect(domain: &str, backend: &'static dyn DynamicBackend) -> R<Session> {
 		TELEMETRY.net_connect.spark();
-		let client = reqwest::ClientBuilder::new()
-			.cookie_store(true)
-			.default_headers(vec![(reqwest::header::USER_AGENT, HeaderValue::from_str(USER_AGENT).unwrap())].into_iter().collect())
-			.build()
-			.map_err(|e| from_unijudge_error(unijudge::Error::TLSFailure(e)))?;
+		let client = Client::new(USER_AGENT).map_err(from_unijudge_error)?;
 		let session = backend.connect(client, domain);
 		let site = format!("https://{}", domain);
 		if let Some(auth) = auth::get_if_cached(&site) {
 			if let Ok(auth) = backend.auth_deserialize(&auth) {
 				log::debug!("cached auth found for {}, {:?}", domain, auth);
-				match backend.auth_restore(&session, &auth) {
+				match backend.auth_restore(&session, &auth).await {
 					Err(unijudge::Error::WrongData) | Err(unijudge::Error::WrongCredentials) | Err(unijudge::Error::AccessDenied) => Ok(()),
 					Err(e) => Err(from_unijudge_error(e)),
 					Ok(()) => Ok(()),
@@ -83,10 +81,13 @@ impl Session {
 		Ok(Session { backend, session, site, domain: domain.to_owned() })
 	}
 
-	pub async fn run<Y>(&self, mut f: impl FnMut(&'static dyn DynamicBackend, &BoxedSession) -> unijudge::Result<Y>) -> R<Y> {
+	pub async fn run<'f, Y, F: Future<Output=unijudge::Result<Y>>+Send+'f>(
+		&'f self,
+		mut f: impl FnMut(&'static dyn DynamicBackend, &'f BoxedSession) -> F+'f,
+	) -> R<Y> {
 		let mut retries_left = NETWORK_ERROR_RETRY_LIMIT;
 		loop {
-			match f(self.backend, &self.session) {
+			match f(self.backend, &self.session).await {
 				Ok(y) => break Ok(y),
 				Err(e @ unijudge::Error::WrongCredentials) | Err(e @ unijudge::Error::AccessDenied) => {
 					log::debug!("access denied for {}, trying to log in {:?}", self.domain, e);
@@ -94,7 +95,7 @@ impl Session {
 					let (username, password) = auth::get_cached_or_ask(&self.site).await?;
 					self.login(&username, &password).await?
 				},
-				Err(unijudge::Error::NetworkFailure(e)) if retries_left > 0 => self.wait_for_retry(&mut retries_left, e),
+				Err(unijudge::Error::NetworkFailure(e)) if retries_left > 0 => self.wait_for_retry(&mut retries_left, e).await,
 				Err(e) => break Err(from_unijudge_error(e)),
 			}
 		}
@@ -102,10 +103,10 @@ impl Session {
 
 	pub async fn login(&self, username: &str, password: &str) -> R<()> {
 		let mut retries_left = NETWORK_ERROR_RETRY_LIMIT;
-		match self.backend.auth_login(&self.session, &username, &password) {
+		match self.backend.auth_login(&self.session, &username, &password).await {
 			Ok(()) => {
 				log::debug!("login successful for {}, trying to cache session", self.domain);
-				if let Some(cache) = self.backend.auth_cache(&self.session).map_err(from_unijudge_error)? {
+				if let Some(cache) = self.backend.auth_cache(&self.session).await.map_err(from_unijudge_error)? {
 					log::debug!("caching session for {}, {:?}", self.domain, cache);
 					auth::save_cache(&self.site, &self.backend.auth_serialize(&cache).map_err(from_unijudge_error)?);
 				} else {
@@ -117,7 +118,7 @@ impl Session {
 				self.maybe_error_show(e);
 				self.force_login_boxed().await?;
 			},
-			Err(unijudge::Error::NetworkFailure(e)) if retries_left > 0 => self.wait_for_retry(&mut retries_left, e),
+			Err(unijudge::Error::NetworkFailure(e)) if retries_left > 0 => self.wait_for_retry(&mut retries_left, e).await,
 			Err(e) => return Err(from_unijudge_error(e)),
 		}
 		Ok(())
@@ -128,7 +129,7 @@ impl Session {
 		self.login(&username, &password).await
 	}
 
-	fn force_login_boxed<'a>(&'a self) -> Pin<Box<dyn Future<Output=R<()>>+Send+Sync+'a>> {
+	fn force_login_boxed<'a>(&'a self) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
 		Box::pin(self.force_login())
 	}
 
@@ -138,7 +139,7 @@ impl Session {
 		}
 	}
 
-	fn wait_for_retry(&self, retries_left: &mut usize, e: reqwest::Error) {
+	async fn wait_for_retry(&self, retries_left: &mut usize, e: unijudge::reqwest::Error) {
 		assert!(*retries_left > 0);
 		let _status = crate::STATUS.push("Waiting to retry");
 		if *retries_left == NETWORK_ERROR_RETRY_LIMIT {
@@ -148,7 +149,7 @@ impl Session {
 				.emit();
 		}
 		*retries_left -= 1;
-		sleep(NETWORK_ERROR_RETRY_DELAY);
+		delay(Instant::now() + NETWORK_ERROR_RETRY_DELAY).await;
 	}
 }
 
@@ -174,7 +175,7 @@ fn from_unijudge_error(e: unijudge::Error) -> evscode::E {
 		unijudge::Error::NotYetStarted => E::from_std(e).reform("contest not yet started"),
 		unijudge::Error::RateLimit => E::from_std(e).reform("too frequent requests to site"),
 		unijudge::Error::NetworkFailure(e) => E::from_std(e).context("network error"),
-		unijudge::Error::TLSFailure(e) => E::from_std(e).context("TLS encryption error"),
+		unijudge::Error::NoTLS(e) => E::from_std(e).context("TLS initialization error"),
 		unijudge::Error::URLParseFailure(e) => E::from_std(e).context("URL parse error"),
 		unijudge::Error::StateCorruption => E::from_std(e).context("broken state"),
 		unijudge::Error::UnexpectedHTML(e) => {

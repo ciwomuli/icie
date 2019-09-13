@@ -7,8 +7,9 @@ use evscode::{error::ResultExt, E, R};
 use futures::{select, FutureExt};
 use serde::{Deserialize, Serialize};
 use std::{
-	cmp::min, path::Path, sync::Arc, thread::sleep, time::{Duration, Instant, SystemTime}
+	cmp::min, path::Path, sync::Arc, time::{Duration, Instant, SystemTime}
 };
+use tokio::timer::delay;
 use unijudge::{
 	boxed::{BoxedContest, BoxedTask}, Backend, Resource, TaskDetails
 };
@@ -37,11 +38,12 @@ pub async fn sprint(sess: Arc<Session>, contest: &BoxedContest, contest_title: O
 	let task0 = tasks.get(0).wrap("could not find any tasks in contest")?;
 	let task0_name = format!("1/{}", tasks.len());
 	let task0_details = fetch_task(task0, &task0_name, &sess).await?;
-	let task0_url = sess.run(|backend, sess| backend.task_url(sess, task0)).await?;
+	let task0_url = sess.run(|backend, sess| async move { backend.task_url(sess, task0) }).await?;
 	let task0_path = design_task_name(root_dir.path(), Some(&task0_details)).await?;
 	init_task(&task0_path, Some(task0_url), Some(task0_details)).await?;
 	let manifest = Manifest { contest_url: url_raw };
-	fs_write(&task0_path.join(".icie-contest"), serde_json::to_string(&manifest).wrap("serialization of contest manifest failed")?).await?;
+	let manifest_path = task0_path.join(".icie-contest");
+	fs_write(&manifest_path, serde_json::to_string(&manifest).wrap("serialization of contest manifest failed")?).await?;
 	root_dir.commit();
 	evscode::open_folder(task0_path, false);
 	Ok(())
@@ -64,7 +66,7 @@ async fn inner_sprint(manifest: &Path) -> R<()> {
 	let manifest = pop_manifest(manifest).await?;
 	let (url, backend) = interpret_url(&manifest.contest_url)?;
 	let url = require_contest(url)?;
-	let sess = Session::connect(&url.domain, backend.backend)?;
+	let sess = Session::connect(&url.domain, backend.backend).await?;
 	let Resource::Contest(contest) = url.resource;
 	let tasks = fetch_tasks(&sess, &contest).await?;
 	let task_dir = evscode::workspace_root()?;
@@ -74,7 +76,7 @@ async fn inner_sprint(manifest: &Path) -> R<()> {
 			let taski_name = format!("{}/{}", i + 1, tasks.len());
 			let details = fetch_task(task, &taski_name, &sess).await?;
 			let root = design_task_name(contest_dir, Some(&details)).await?;
-			init_task(&root, Some(sess.run(|_, _| sess.backend.task_url(&sess.session, &task)).await?), Some(details)).await?;
+			init_task(&root, Some(sess.run(|_, _| async { sess.backend.task_url(&sess.session, &task) }).await?), Some(details)).await?;
 		}
 	}
 	Ok(())
@@ -86,11 +88,13 @@ async fn fetch_task(task: &BoxedTask, name: &str, sess: &Session) -> R<TaskDetai
 }
 
 async fn wait_for_contest(url: &str, site: &str, sess: &Arc<Session>) -> R<()> {
-	let details =
-		match sess.run(|backend, sess| Ok(backend.contests(sess)?.into_iter().find(|details| backend.contest_url(&details.id) == url))).await? {
-			Some(details) => details,
-			None => return Ok(()),
-		};
+	let details = match sess
+		.run(|backend, sess| async move { Ok(backend.contests(sess).await?.into_iter().find(|details| backend.contest_url(&details.id) == url)) })
+		.await?
+	{
+		Some(details) => details,
+		None => return Ok(()),
+	};
 	let deadline = SystemTime::from(details.start);
 	let total = match deadline.duration_since(SystemTime::now()) {
 		Ok(total) => total,
@@ -134,15 +138,17 @@ async fn fetch_tasks(sess: &Session, contest: &BoxedContest) -> R<Vec<BoxedTask>
 	let _status = crate::STATUS.push("Fetching contest");
 	let mut wait_retries = NOT_YET_STARTED_RETRY_LIMIT;
 	sess.run(|backend, sess| {
-		loop {
-			match backend.contest_tasks(sess, &contest) {
-				Err(unijudge::Error::NotYetStarted) if wait_retries > 0 => {
-					let _status =
-						crate::STATUS.push(format!("Fetching contest (waiting for time sync, {} left)", plural(wait_retries, "retry", "retries")));
-					wait_retries -= 1;
-					sleep(NOT_YET_STARTED_RETRY_DELAY);
-				},
-				tasks => break tasks,
+		async move {
+			loop {
+				match backend.contest_tasks(sess, &contest).await {
+					Err(unijudge::Error::NotYetStarted) if wait_retries > 0 => {
+						let _status = crate::STATUS
+							.push(format!("Fetching contest (waiting for time sync, {} left)", plural(wait_retries, "retry", "retries")));
+						wait_retries -= 1;
+						delay(Instant::now() + NOT_YET_STARTED_RETRY_DELAY).await;
+					},
+					tasks => break tasks,
+				}
 			}
 		}
 	})

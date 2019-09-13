@@ -54,7 +54,8 @@ async fn url() -> R<()> {
 				Some((url, backend)) => Some(fetch_task_details(url, backend).await?),
 				None => None,
 			};
-			let root = names::design_task_name(&*crate::dir::PROJECT_DIRECTORY.get(), meta.as_ref()).await?;
+			let root = crate::dir::PROJECT_DIRECTORY.get();
+			let root = names::design_task_name(&*root, meta.as_ref()).await?;
 			let dir = util::TransactionDir::new(&root).await?;
 			init_task(&root, raw_url, meta).await?;
 			dir.commit();
@@ -62,7 +63,7 @@ async fn url() -> R<()> {
 		},
 		InitCommand::Contest { url, backend } => {
 			TELEMETRY.init_url_contest.spark();
-			let sess = net::Session::connect(&url.domain, backend.backend)?;
+			let sess = net::Session::connect(&url.domain, backend.backend).await?;
 			let Resource::Contest(contest) = url.resource;
 			contest::sprint(Arc::new(sess), &contest, None).await?;
 		},
@@ -119,7 +120,7 @@ fn url_to_command(url: Option<&String>) -> R<InitCommand> {
 
 async fn fetch_task_details(url: BoxedTaskURL, backend: &'static BackendMeta) -> R<TaskDetails> {
 	let Resource::Task(task) = &url.resource;
-	let sess = net::Session::connect(&url.domain, backend.backend)?;
+	let sess = net::Session::connect(&url.domain, backend.backend).await?;
 	let meta = {
 		let _status = crate::STATUS.push("Fetching task");
 		sess.run(|backend, sess| backend.task_details(sess, &task)).await?
