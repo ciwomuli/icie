@@ -2,9 +2,9 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{future::Future, pin::Pin, sync::Mutex};
 use unijudge::{
-	backtrace::Backtrace, debris::{Context, Document, Find}, http::Client, json, reqwest::{cookie_store::Cookie, StatusCode, Url}, ContestDetails, Error, Language, RejectionCause, Resource, Result, Statement, Submission, TaskDetails, Verdict
+	backtrace::Backtrace, debris::{Context, Document, Find}, http::{Client, Cookie}, json, reqwest::{StatusCode, Url}, ContestDetails, Error, Language, RejectionCause, Resource, Result, Statement, Submission, TaskDetails, Verdict
 };
 
 pub struct CodeChef;
@@ -30,7 +30,7 @@ pub struct Session {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CachedAuth {
 	username: String,
-	c_sess: Cookie<'static>,
+	c_sess: Cookie,
 }
 
 #[async_trait]
@@ -61,17 +61,9 @@ impl unijudge::Backend for CodeChef {
 	}
 
 	async fn auth_cache(&self, session: &Self::Session) -> Result<Option<Self::CachedAuth>> {
-		let username = match session.username.lock().map_err(|_| Error::StateCorruption)?.clone() {
-			Some(username) => username,
-			None => return Ok(None),
-		};
-		let cookies = session.client.cookies().read().map_err(|_| Error::StateCorruption)?;
-		let c_sess = match cookies.0.iter_unexpired().find(|c| c.name().starts_with("SESS")).cloned() {
-			Some(c_sess) => c_sess,
-			None => return Ok(None),
-		}
-		.into_owned();
-		Ok(Some(CachedAuth { username, c_sess }))
+		let username = session.username.lock().map_err(|_| Error::StateCorruption)?.clone();
+		let c_sess = session.client.cookie_get_if(|c| c.starts_with("SESS"))?;
+		Ok(try { CachedAuth { username: username?, c_sess: c_sess? } })
 	}
 
 	fn auth_deserialize(&self, data: &str) -> Result<Self::CachedAuth> {
@@ -79,36 +71,42 @@ impl unijudge::Backend for CodeChef {
 	}
 
 	async fn auth_login(&self, session: &Self::Session, username: &str, password: &str) -> Result<()> {
-		let mut resp1 = session.client.get("https://www.codechef.com/").send()?;
-		let doc1 = Document::new(&resp1.text()?);
-		let form_build_id = doc1.find("#new-login-form [name=form_build_id]")?.attr("value")?.string();
-		let mut resp2 = session
+		let resp1 = session.client.get("https://www.codechef.com/".parse()?).send().await?;
+		let form_build_id = Document::new(&resp1.text().await?).find("#new-login-form [name=form_build_id]")?.attr("value")?.string();
+		let resp2 = session
 			.client
-			.post("https://www.codechef.com/")
+			.post("https://www.codechef.com/".parse()?)
 			.form(&[("name", username), ("pass", password), ("form_build_id", &form_build_id), ("form_id", "new_login_form"), ("op", "Login")])
-			.send()?;
-		let doc = Document::new(&resp2.text()?);
-		if doc.find("a[title=\"Edit Your Account\"]").is_ok() {
-			if resp2.url().as_str() == "https://www.codechef.com/session/limit" {
-				// CodeChef does not allow to have more than one session active at once.
-				// When this happens, disconnect all the other sessions so that ICIE's one can proceed.
-				// This can be irritating, but there is no other sensible way of doing this.
-				self.disconnect_other_sessions(session, &doc)?;
+			.send()
+			.await?;
+		let resp2_url = resp2.url().clone();
+		let other_sessions = {
+			let doc = Document::new(&resp2.text().await?);
+			if doc.find("a[title=\"Edit Your Account\"]").is_ok() {
+				if resp2_url.as_str() == "https://www.codechef.com/session/limit" {
+					// CodeChef does not allow to have more than one session active at once.
+					// When this happens, disconnect all the other sessions so that ICIE's one can proceed.
+					// This can be irritating, but there is no other sensible way of doing this.
+					Some(self.select_other_sessions(&doc)?)
+				} else {
+					None
+				}
+			} else if doc.html().contains("Sorry, unrecognized username or password.") {
+				return Err(Error::WrongCredentials);
+			} else {
+				return Err(Error::UnexpectedHTML(doc.error("unrecognized login outcome")));
 			}
-			*session.username.lock().map_err(|_| Error::StateCorruption)? = Some(username.to_owned());
-			Ok(())
-		} else if doc.html().contains("Sorry, unrecognized username or password.") {
-			Err(Error::WrongCredentials)
-		} else {
-			Err(Error::UnexpectedHTML(doc.error("unrecognized login outcome")))
+		};
+		*session.username.lock().map_err(|_| Error::StateCorruption)? = Some(username.to_owned());
+		if let Some(other_sessions) = other_sessions {
+			self.disconnect_other_sessions(session, other_sessions).await?;
 		}
+		Ok(())
 	}
 
 	async fn auth_restore(&self, session: &Self::Session, auth: &Self::CachedAuth) -> Result<()> {
 		*session.username.lock().map_err(|_| Error::StateCorruption)? = Some(auth.username.clone());
-		let url = "https://www.codechef.com".parse()?;
-		let mut cookies = session.client.cookies().write().map_err(|_| Error::StateCorruption)?;
-		cookies.0.insert(auth.c_sess.clone(), &url).map_err(|_| Error::WrongData)?;
+		session.client.cookie_set(auth.c_sess.clone(), "https://www.codechef.com")?;
 		Ok(())
 	}
 
@@ -122,7 +120,7 @@ impl unijudge::Backend for CodeChef {
 
 	async fn task_details(&self, session: &Self::Session, task: &Self::Task) -> Result<TaskDetails> {
 		let url: Url = format!("https://www.codechef.com/api/contests/{}/problems/{}", task.contest.as_virt_symbol(), task.task).parse()?;
-		let resp = json::from_resp::<api::Task>(session.client.get(url.clone()).send()?, "/api/contests/{}/problems/{}")?;
+		let resp = json::from_resp::<api::Task>(session.client.get(url.clone()).send().await?, "/api/contests/{}/problems/{}").await?;
 		let statement = Some(self.prepare_statement(&resp.problem_name, resp.body));
 		Ok(TaskDetails {
 			id: task.task.clone(),
@@ -138,9 +136,14 @@ impl unijudge::Backend for CodeChef {
 	async fn task_languages(&self, session: &Self::Session, task: &Self::Task) -> Result<Vec<Language>> {
 		// Querying languages doesn't require login, in contrast to most other sites.
 		let resp = json::from_resp::<api::Languages>(
-			session.client.get(&format!("https://www.codechef.com/api/ide/{}/languages/{}", task.contest.as_virt_symbol(), task.task)).send()?,
+			session
+				.client
+				.get(format!("https://www.codechef.com/api/ide/{}/languages/{}", task.contest.as_virt_symbol(), task.task).parse()?)
+				.send()
+				.await?,
 			"/api/ide/{}/languages/{}",
-		)?;
+		)
+		.await?;
 		Ok(resp
 			.languages
 			.into_iter()
@@ -154,17 +157,22 @@ impl unijudge::Backend for CodeChef {
 		let doc = Document::new(
 			&session
 				.client
-				.get(&format!(
-					"https://www.codechef.com/{}status/{},{}",
-					match &task.contest {
-						Contest::Practice => String::new(),
-						Contest::Normal(contest) => format!("{}/", contest),
-					},
-					task.task,
-					session.req_user()?
-				))
-				.send()?
-				.text()?,
+				.get(
+					format!(
+						"https://www.codechef.com/{}status/{},{}",
+						match &task.contest {
+							Contest::Practice => String::new(),
+							Contest::Normal(contest) => format!("{}/", contest),
+						},
+						task.task,
+						session.req_user()?
+					)
+					.parse()?,
+				)
+				.send()
+				.await?
+				.text()
+				.await?,
 		);
 		if doc.find("#recaptcha-content").is_ok() {
 			// This could possibly also happen in the other endpoints.
@@ -198,16 +206,17 @@ impl unijudge::Backend for CodeChef {
 
 	async fn task_submit(&self, session: &Self::Session, task: &Self::Task, language: &Language, code: &str) -> Result<String> {
 		// This seems to work even if submitting as a team, although there are some mild problems with tracking.
-		let mut resp = session
+		let resp = session
 			.client
-			.post("https://www.codechef.com/api/ide/submit")
+			.post("https://www.codechef.com/api/ide/submit".parse()?)
 			.form(&[("sourceCode", code), ("language", &language.id), ("problemCode", &task.task), ("contestCode", task.contest.as_virt_symbol())])
-			.send()?;
+			.send()
+			.await?;
 		if resp.status() == StatusCode::FORBIDDEN {
 			return Err(Error::AccessDenied);
 		}
 		let endpoint = "/api/ide/submit";
-		let resp_raw = resp.text()?;
+		let resp_raw = resp.text().await?;
 		let resp = json::from_str::<api::Submit>(&resp_raw, endpoint)?;
 		if resp.status == "OK" {
 			Ok(resp.upid.ok_or_else(|| Error::UnexpectedJSON { endpoint, backtrace: Backtrace::new(), resp_raw, inner: None })?)
@@ -229,7 +238,7 @@ impl unijudge::Backend for CodeChef {
 	}
 
 	async fn contest_tasks(&self, session: &Self::Session, contest: &Self::Contest) -> Result<Vec<Self::Task>> {
-		Ok(self.contest_details_ex(session, contest)?.tasks)
+		Ok(self.contest_details_ex(session, contest).await?.tasks)
 	}
 
 	fn contest_url(&self, contest: &Self::Contest) -> String {
@@ -237,11 +246,11 @@ impl unijudge::Backend for CodeChef {
 	}
 
 	async fn contest_title(&self, session: &Self::Session, contest: &Self::Contest) -> Result<String> {
-		Ok(self.contest_details_ex(session, contest)?.title)
+		Ok(self.contest_details_ex(session, contest).await?.title)
 	}
 
 	async fn contests(&self, session: &Self::Session) -> Result<Vec<ContestDetails<Self::Contest>>> {
-		let doc = Document::new(&session.client.get("https://www.codechef.com/contests").send()?.text()?);
+		let doc = Document::new(&session.client.get("https://www.codechef.com/contests".parse()?).send().await?.text().await?);
 		doc.find("#primary-content > .content-wrapper")?
 			// CodeChef does not separate ongoing contests and permanent contests, so we only select the upcoming ones.
 			// This is irritating, but I would like to add some general heuristics for all sites later.
@@ -272,12 +281,18 @@ struct ContestDetailsEx {
 	title: String,
 }
 
+struct OtherSessions {
+	others: Vec<(String, String)>,
+	form_build_id: String,
+	form_token: String,
+}
+
 impl CodeChef {
-	fn disconnect_other_sessions(&self, session: &<Self as unijudge::Backend>::Session, doc: &Document) -> Result<()> {
+	fn select_other_sessions(&self, doc: &Document) -> Result<OtherSessions> {
 		let form = doc.find("#session-limit-page")?;
-		let build_id = form.find("[name=form_build_id]")?.attr("value")?.string();
-		let token = form.find("[name=form_token]")?.attr("value")?.string();
-		let other_sessions: Vec<(String, String)> = form
+		let form_build_id = form.find("[name=form_build_id]")?.attr("value")?.string();
+		let form_token = form.find("[name=form_token]")?.attr("value")?.string();
+		let others = form
 			.find_all(".form-item > .form-checkboxes > .form-item")
 			.filter(|fi| fi.find("b").map(|b| b.text().as_str().is_empty()).unwrap_or(true))
 			.map(|fi| {
@@ -286,22 +301,33 @@ impl CodeChef {
 				Ok((name, value))
 			})
 			.collect::<Result<_>>()?;
-		let payload = other_sessions
+		Ok(OtherSessions { others, form_build_id, form_token })
+	}
+
+	async fn disconnect_other_sessions(&self, session: &Session, other: OtherSessions) -> Result<()> {
+		let payload = other
+			.others
 			.iter()
 			.map(|(k, v)| (k.as_str(), v.as_str()))
 			.chain(
-				[("op", "Disconnect session"), ("form_build_id", &build_id), ("form_token", &token), ("form_id", "session_limit_page")]
-					.iter()
-					.cloned(),
+				[
+					("op", "Disconnect session"),
+					("form_build_id", &other.form_build_id),
+					("form_token", &other.form_token),
+					("form_id", "session_limit_page"),
+				]
+				.iter()
+				.cloned(),
 			)
 			.collect::<Vec<_>>();
-		session.client.post("https://www.codechef.com/session/limit").form(&payload).send()?;
+		session.client.post("https://www.codechef.com/session/limit".parse()?).form(&payload).send().await?;
 		Ok(())
 	}
 
-	fn contest_details_ex(&self, session: &Session, contest: &Contest) -> Result<ContestDetailsEx> {
+	async fn contest_details_ex(&self, session: &Session, contest: &Contest) -> Result<ContestDetailsEx> {
 		let endpoint = "https://www.codechef.com/api/contests/{}";
-		let resp_raw = session.client.get(&format!("https://www.codechef.com/api/contests/{}", contest.as_virt_symbol())).send()?.text()?;
+		let resp_raw =
+			session.client.get(format!("https://www.codechef.com/api/contests/{}", contest.as_virt_symbol()).parse()?).send().await?.text().await?;
 		let resp = json::from_str::<api::ContestTasks>(&resp_raw, endpoint)?;
 		if let Some(tasks) = resp.problems {
 			let mut tasks: Vec<_> =
@@ -319,7 +345,8 @@ impl CodeChef {
 			let tasks: Option<_> = try {
 				let div = resp.user_rating_div?.div.code;
 				let child = &resp.child_contests.as_ref()?.get(&div).as_ref()?.contest_code;
-				self.contest_details_ex(session, &Contest::Normal(child.clone()))
+				let contest = Contest::Normal(child.clone());
+				self.contest_details_ex_boxed(session, &contest).await
 			};
 			tasks.ok_or_else(|| Error::UnexpectedJSON { endpoint, backtrace: Backtrace::new(), resp_raw, inner: None })?
 		} else {
@@ -327,6 +354,14 @@ impl CodeChef {
 			// This behaviour is unsatisfactory, so we require a login from the user.
 			Err(Error::AccessDenied)
 		}
+	}
+
+	fn contest_details_ex_boxed<'a>(
+		&'a self,
+		session: &'a Session,
+		contest: &'a Contest,
+	) -> Pin<Box<dyn Future<Output=Result<ContestDetailsEx>>+Send+'a>> {
+		Box::pin(self.contest_details_ex(session, contest))
 	}
 
 	fn prepare_statement(&self, title: &str, text: String) -> Statement {

@@ -23,13 +23,17 @@ impl Client {
 
 	pub fn cookie_set(&self, cookie: Cookie, url: &str) -> Result<()> {
 		let mut cookies = self.inner.cookies().unwrap().write().map_err(|_| Error::StateCorruption)?;
-		cookies.0.insert_raw(&cookie.cookie, &url.parse()?).unwrap();
+		cookies.0.insert_raw(&cookie.cookie, &url.parse()?).map_err(|_| Error::WrongData)?;
 		Ok(())
 	}
 
 	pub fn cookie_get(&self, key: &str) -> Result<Option<Cookie>> {
+		self.cookie_get_if(|name| name == key)
+	}
+
+	pub fn cookie_get_if(&self, mut key: impl FnMut(&str) -> bool) -> Result<Option<Cookie>> {
 		let cookies = self.inner.cookies().unwrap().read().map_err(|_| Error::StateCorruption)?;
-		let cookie = match cookies.0.iter_unexpired().find(|cookie| cookie.name() == key) {
+		let cookie = match cookies.0.iter_unexpired().find(|cookie| key(cookie.name())) {
 			Some(cookie) => Cookie { cookie: cookie.deref().clone().into_owned() },
 			None => panic!("must find!"),
 		};

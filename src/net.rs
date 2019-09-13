@@ -14,11 +14,11 @@ const USER_AGENT: &str = concat!("ICIE/", env!("CARGO_PKG_VERSION"), " (+https:/
 const NETWORK_ERROR_RETRY_LIMIT: usize = 4;
 const NETWORK_ERROR_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-pub static BACKENDS: [BackendMeta; 1] = [
-	//	BackendMeta::new(&unijudge_atcoder::AtCoder, "C++14 (GCC 5.4.1)", "unijudge_atcoder"),
-	//	BackendMeta::new(&unijudge_codechef::CodeChef, "C++14(gcc 6.3)", "unijudge_codechef"),
-	//	BackendMeta::new(&unijudge_codeforces::Codeforces, "GNU G++17 7.3.0", "unijudge_codeforces"),
-	//	BackendMeta::new(&unijudge_sio2::Sio2, "C++", "unijudge_sio2"),
+pub static BACKENDS: [BackendMeta; 5] = [
+	BackendMeta::new(&unijudge_atcoder::AtCoder, "C++14 (GCC 5.4.1)", "unijudge_atcoder"),
+	BackendMeta::new(&unijudge_codechef::CodeChef, "C++14(gcc 6.3)", "unijudge_codechef"),
+	BackendMeta::new(&unijudge_codeforces::Codeforces, "GNU G++17 7.3.0", "unijudge_codeforces"),
+	BackendMeta::new(&unijudge_sio2::Sio2, "C++", "unijudge_sio2"),
 	BackendMeta::new(&unijudge_spoj::SPOJ, "C++14 (clang 8.0)", "unijudge_spoj"),
 ];
 

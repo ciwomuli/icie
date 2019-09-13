@@ -21,10 +21,10 @@ shellexpand = "1.0"
 tempfile = "3.1"
 tokio = { version = "0.2.0-alpha.4", features = ["fs", "timer"], default-features = false }
 unijudge = { path = "./unijudge" }
-#unijudge-atcoder = { path = "./unijudge-atcoder" }
-#unijudge-codechef = { path = "./unijudge-codechef" }
-#unijudge-codeforces = { path = "./unijudge-codeforces" }
-#unijudge-sio2 = { path = "./unijudge-sio2" }
+unijudge-atcoder = { path = "./unijudge-atcoder" }
+unijudge-codechef = { path = "./unijudge-codechef" }
+unijudge-codeforces = { path = "./unijudge-codeforces" }
+unijudge-sio2 = { path = "./unijudge-sio2" }
 unijudge-spoj = { path = "./unijudge-spoj" }
 wait-timeout = "0.2"
 walkdir = "2.2"
@@ -42,9 +42,9 @@ members = [
 	"evscode",
 	"evscode-codegen",
 	"unijudge",
-#	"unijudge-atcoder",
-#	"unijudge-codechef",
-#	"unijudge-codeforces",
-#	"unijudge-sio2",
+	"unijudge-atcoder",
+	"unijudge-codechef",
+	"unijudge-codeforces",
+	"unijudge-sio2",
 	"unijudge-spoj",
 ]
