@@ -62,7 +62,7 @@ async fn webview_manage(handle: evscode::goodies::WebviewHandle) -> R<()> {
 						worker_tx.send(WorkerOrder::Pause).await.unwrap();
 					}
 					view.post_message(Food::State { running: false, reset: false });
-					evscode::runtime::spawn_async(add_test_input(input));
+					evscode::runtime::spawn(add_test_input(input));
 				},
 			},
 			ManagerMessage::Report(report) => match report {
@@ -93,7 +93,7 @@ async fn webview_manage(handle: evscode::goodies::WebviewHandle) -> R<()> {
 
 fn spawn_worker(orders: mpsc::UnboundedReceiver<WorkerOrder>) -> impl Stream<Item=WorkerReport> {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
-	evscode::runtime::spawn_async(async move {
+	evscode::runtime::spawn(async move {
 		worker_thread(tx, orders).await;
 		Ok(())
 	});

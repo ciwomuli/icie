@@ -52,7 +52,7 @@ pub fn time_limit() -> Option<Duration> {
 
 fn run_thread(ins: Vec<PathBuf>, task: ci::task::Task, solution: ci::exec::Executable) -> impl Stream<Item=R<TestRun>> {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
-	evscode::runtime::spawn_async(async {
+	evscode::runtime::spawn(async {
 		let _status = STATUS.push("Executing");
 		let mut tx = tx;
 		let task = task;

@@ -60,24 +60,26 @@ impl Computation for TestViewLogic {
 			while let Some(note) = stream.next().await {
 				let note = note?;
 				match note["tag"].as_str() {
-					Some("trigger_rr") => evscode::runtime::spawn_async({
+					Some("trigger_rr") => evscode::runtime::spawn({
 						let source = source.clone();
 						async move {
 							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
 							crate::debug::rr(in_path, source)
 						}
 					}),
-					Some("trigger_gdb") => evscode::runtime::spawn_async({
+					Some("trigger_gdb") => evscode::runtime::spawn({
 						let source = source.clone();
 						async move {
 							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
 							crate::debug::gdb(in_path, source)
 						}
 					}),
-					Some("new_test") => evscode::runtime::spawn_async(async move {
-						crate::test::add(note["input"].as_str().unwrap(), note["desired"].as_str().unwrap()).await
-					}),
-					Some("set_alt") => evscode::runtime::spawn_async({
+					Some("new_test") => {
+						evscode::runtime::spawn(
+							async move { crate::test::add(note["input"].as_str().unwrap(), note["desired"].as_str().unwrap()).await },
+						)
+					},
+					Some("set_alt") => evscode::runtime::spawn({
 						let source = source.clone();
 						async move {
 							TELEMETRY.test_alternative_add.spark();
@@ -89,7 +91,7 @@ impl Computation for TestViewLogic {
 							Ok(())
 						}
 					}),
-					Some("del_alt") => evscode::runtime::spawn_async({
+					Some("del_alt") => evscode::runtime::spawn({
 						let source = source.clone();
 						async move {
 							TELEMETRY.test_alternative_delete.spark();
@@ -106,7 +108,7 @@ impl Computation for TestViewLogic {
 					Some("action_notice") => SKILL_ACTIONS.add_use().await,
 					Some("eval_req") => {
 						let webview = webview.clone();
-						evscode::runtime::spawn_async(async move {
+						evscode::runtime::spawn(async move {
 							let _status = crate::STATUS.push("Evaluating");
 							let id = note["id"].as_i64().unwrap();
 							let input = note["input"].as_str().unwrap();

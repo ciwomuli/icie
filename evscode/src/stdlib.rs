@@ -102,12 +102,12 @@ pub async fn edit_paste(path: &Path, text: &str, position: (usize, usize)) {
 /// Get the path to workspace folder.
 /// Returns an error if no folder is opened.
 pub fn workspace_root() -> R<PathBuf> {
-	crate::internal::executor::WORKSPACE_ROOT.lock().unwrap().clone().ok_or_else(|| E::error("this operation requires a folder to be open"))
+	crate::internal::executor::ROOT_WORKSPACE.lock().unwrap().clone().ok_or_else(|| E::error("this operation requires a folder to be open"))
 }
 
 /// Get the path to the root directory of the extension installation.
 pub fn extension_root() -> PathBuf {
-	crate::internal::executor::EXTENSION_ROOT.lock().unwrap().clone().unwrap()
+	crate::internal::executor::ROOT_EXTENSION.lock().unwrap().clone().unwrap()
 }
 
 /// Get the path to the currently edited file.

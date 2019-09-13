@@ -76,7 +76,7 @@ impl Executable {
 
 fn capture(mut r: impl Read+Send+'static) -> oneshot::Receiver<io::Result<String>> {
 	let (tx, rx) = oneshot::channel();
-	evscode::runtime::spawn_async(async move {
+	evscode::runtime::spawn(async move {
 		let mut buf = String::new();
 		tx.send(match r.read_to_string(&mut buf) {
 			Ok(_) => Ok(buf),

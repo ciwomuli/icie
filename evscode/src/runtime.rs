@@ -3,12 +3,10 @@
 use crate::{
 	internal::executor::{error_show, runtime_handle, CONFIG_ENTRIES}, meta::ConfigEntry, R
 };
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
-/// Spawn an async operation in a new thread.
-///
-/// See [`spawn`] for details.
-pub fn spawn_async(f: impl Future<Output=R<()>>+Send+'static) {
+/// Spawn an asynchronous operation concurrently to the active one.
+pub fn spawn(f: impl Future<Output=R<()>>+Send+'static) {
 	runtime_handle()
 		.spawn(async move {
 			match f.await {
@@ -20,6 +18,6 @@ pub fn spawn_async(f: impl Future<Output=R<()>>+Send+'static) {
 }
 
 /// Returns a vector with metadata on all configuration entries in the plugin.
-pub fn config_entries() -> Arc<&'static [ConfigEntry]> {
-	CONFIG_ENTRIES.load().as_ref().unwrap().clone()
+pub fn config_entries() -> &'static [ConfigEntry] {
+	CONFIG_ENTRIES.lock().unwrap().unwrap()
 }

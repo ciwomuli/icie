@@ -31,7 +31,7 @@ impl WebviewSingleton {
 			let view = (self.create)()?;
 			let handle = Arc::new(Mutex::new(view));
 			let handle2 = handle.clone();
-			crate::runtime::spawn_async(async move {
+			crate::runtime::spawn(async move {
 				(self.manage)(handle2).await?;
 				let mut container_lock = self.container.lock().await;
 				*container_lock = None;

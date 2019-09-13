@@ -61,7 +61,7 @@ impl<T: Computation> WebviewResultmap<T> {
 		let lck = self.collection.lock().await;
 		for k in lck.keys() {
 			let k = k.clone();
-			crate::runtime::spawn_async(async move {
+			crate::runtime::spawn(async move {
 				self.get_force(k).await?;
 				Ok(())
 			});
@@ -100,7 +100,7 @@ impl<T: Computation> WebviewResultmap<T> {
 		let worker = self.computation.manage(key, &value, webview.clone())?;
 		let key = key.clone();
 		let handle = webview.clone();
-		crate::runtime::spawn_async(async move {
+		crate::runtime::spawn(async move {
 			let resultmap: &'static WebviewResultmap<T> = self;
 			let delayed_error = worker.await;
 			let mut collection = resultmap.collection.lock().await;

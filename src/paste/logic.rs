@@ -1,5 +1,6 @@
+use async_trait::async_trait;
 use evscode::{E, R};
-use std::{collections::HashMap, future::Future, path::PathBuf, pin::Pin, time::SystemTime};
+use std::{collections::HashMap, path::PathBuf, time::SystemTime};
 
 #[derive(Debug)]
 pub struct Library {
@@ -170,9 +171,10 @@ fn skip_to_toplevel(mut pos: usize, source: &str) -> usize {
 	}
 }
 
+#[async_trait]
 pub trait PasteContext {
 	fn has(&mut self, piece: &str) -> bool;
-	fn paste<'a>(&'a mut self, piece: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>>;
+	async fn paste(&mut self, piece: &str) -> R<()>;
 }
 
 struct Graph {
@@ -407,23 +409,23 @@ struct Graph {
 		lib: &'a Library,
 		buf: &'a mut String,
 	}
+
+	#[async_trait]
 	impl PasteContext for PlaceMockContext<'_> {
 		fn has(&mut self, piece: &str) -> bool {
 			self.buf.contains(&self.lib.pieces[piece].guarantee)
 		}
 
-		fn paste<'a>(&'a mut self, piece: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
-			Box::pin(async move {
-				let ((line, column), snippet) = self.lib.place(piece, &self.buf);
-				*self.buf = self
-					.buf
-					.split('\n')
-					.enumerate()
-					.map(|(i, row)| if i == line { format!("{}{}{}", &row[..column], snippet, &row[column..]) } else { row.to_owned() })
-					.collect::<Vec<_>>()
-					.join("\n");
-				Ok(())
-			})
+		async fn paste(&mut self, piece: &str) -> R<()> {
+			let ((line, column), snippet) = self.lib.place(piece, &self.buf);
+			*self.buf = self
+				.buf
+				.split('\n')
+				.enumerate()
+				.map(|(i, row)| if i == line { format!("{}{}{}", &row[..column], snippet, &row[column..]) } else { row.to_owned() })
+				.collect::<Vec<_>>()
+				.join("\n");
+			Ok(())
 		}
 	}
 
@@ -437,16 +439,16 @@ struct Graph {
 	struct MockContext<'a> {
 		buf: &'a mut Vec<String>,
 	}
+
+	#[async_trait]
 	impl PasteContext for MockContext<'_> {
 		fn has(&mut self, piece_id: &str) -> bool {
 			self.buf.contains(&piece_id.to_owned())
 		}
 
-		fn paste<'a>(&'a mut self, piece_id: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
-			Box::pin(async move {
-				self.buf.push(piece_id.to_owned());
-				Ok(())
-			})
+		async fn paste(&mut self, piece_id: &str) -> R<()> {
+			self.buf.push(piece_id.to_owned());
+			Ok(())
 		}
 	}
 

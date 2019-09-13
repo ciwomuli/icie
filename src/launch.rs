@@ -9,7 +9,7 @@ use unijudge::{Backend, Resource, Statement};
 pub async fn activate() -> R<()> {
 	let _status = crate::STATUS.push("Launching");
 	*telemetry::START_TIME.lock().unwrap() = Some(Instant::now());
-	evscode::runtime::spawn_async(crate::newsletter::check());
+	evscode::runtime::spawn(crate::newsletter::check());
 	layout_setup().await?;
 	init::contest::check_for_manifest().await?;
 	Ok(())
@@ -35,7 +35,7 @@ pub async fn layout_setup() -> R<()> {
 
 fn display_pdf(webview: Webview, pdf: &[u8]) {
 	let pdf = pdf.to_owned();
-	evscode::runtime::spawn_async(async {
+	evscode::runtime::spawn(async {
 		let webview = webview;
 		let _status = crate::STATUS.push("Rendering PDF");
 		TELEMETRY.statement_pdf.spark();

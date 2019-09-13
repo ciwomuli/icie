@@ -120,7 +120,7 @@ pub async fn build(source: impl util::MaybePath, codegen: &ci::cpp::Codegen, for
 	} else {
 		if !status.warnings.is_empty() {
 			let warnings = status.warnings;
-			evscode::runtime::spawn_async(show_warnings(warnings));
+			evscode::runtime::spawn(show_warnings(warnings));
 		}
 		Ok(status.executable)
 	}

@@ -3,10 +3,11 @@ mod logic;
 mod piece_parse;
 
 use crate::{dir, telemetry::TELEMETRY};
+use async_trait::async_trait;
 use evscode::{error::ResultExt, E, R};
 use itertools::Itertools;
 use logic::{Library, Piece};
-use std::{future::Future, path::PathBuf, pin::Pin, time::SystemTime};
+use std::{path::PathBuf, time::SystemTime};
 
 #[evscode::command(title = "ICIE Quick Paste", key = "alt+[")]
 async fn quick() -> R<()> {
@@ -92,19 +93,19 @@ pub struct VscodePaste<'a> {
 	text: String,
 	library: &'a Library,
 }
+
+#[async_trait]
 impl logic::PasteContext for VscodePaste<'_> {
 	fn has(&mut self, piece_id: &str) -> bool {
 		let piece = &self.library.pieces[piece_id];
 		self.text.contains(&piece.guarantee)
 	}
 
-	fn paste<'a>(&'a mut self, piece_id: &'a str) -> Pin<Box<dyn Future<Output=R<()>>+Send+'a>> {
-		Box::pin(async move {
-			let (position, snippet) = self.library.place(piece_id, &self.text);
-			evscode::edit_paste(&self.solution, &snippet, position).await;
-			self.text = evscode::query_document_text(&self.solution).await;
-			Ok(())
-		})
+	async fn paste(&mut self, piece_id: &str) -> R<()> {
+		let (position, snippet) = self.library.place(piece_id, &self.text);
+		evscode::edit_paste(&self.solution, &snippet, position).await;
+		self.text = evscode::query_document_text(&self.solution).await;
+		Ok(())
 	}
 }
 

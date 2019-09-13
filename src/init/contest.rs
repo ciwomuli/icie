@@ -158,7 +158,7 @@ async fn fetch_tasks(sess: &Session, contest: &BoxedContest) -> R<Vec<BoxedTask>
 fn spawn_login_suggestion(site: &str, sess: &Arc<Session>) {
 	let site = site.to_owned();
 	let sess = sess.clone();
-	evscode::runtime::spawn_async(async move {
+	evscode::runtime::spawn(async move {
 		if !auth::has_any_saved(&site) {
 			let message = format!("You are not logged in to {}, maybe do it now to save time when submitting?", site);
 			let dec = evscode::Message::new(&message).item("log-in".to_owned(), "Log in", false).show().await;
