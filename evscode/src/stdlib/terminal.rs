@@ -1,6 +1,5 @@
 //! Integrated terminal support.
 
-use crate::internal::executor::{send_object, HANDLE_FACTORY};
 use std::path::PathBuf;
 
 /// Builder object for an integrated terminal.
@@ -14,7 +13,8 @@ pub struct Builder {
 	strict_env: bool,
 }
 
-/// Builder for configuring integrated terminals. See [module documentation](index.html) for details.
+/// Builder for configuring integrated terminals. See [module documentation](index.html) for
+/// details.
 impl Builder {
 	/// Set the current working directory.
 	pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
@@ -70,25 +70,16 @@ impl Builder {
 
 	/// Spawn the terminal session.
 	pub fn create(self) -> Terminal {
-		let hid = HANDLE_FACTORY.generate();
-		let env = self.env.map(|env| {
-			let mut obj = json::object! {};
-			for (k, v) in env {
-				obj[k] = json::from(v);
-			}
-			obj
+		let terminal = vscode_sys::window::create_terminal(vscode_sys::window::TerminalOptions {
+			cwd: self.cwd.as_ref().map(|p| p.to_str().unwrap()),
+			env: self.env.map(|env| env.into_iter().collect()),
+			hide_from_user: Some(false),
+			name: self.name.as_deref(),
+			shell_args: self.shell_args,
+			shell_path: self.shell_path.as_ref().map(|p| p.to_str().unwrap()),
+			strict_env: Some(self.strict_env),
 		});
-		send_object(json::object! {
-			"tag" => "terminal_create",
-			"hid" => hid,
-			"cwd" => self.cwd.as_ref().map(|p| p.to_str().unwrap()),
-			"env" => env,
-			"name" => self.name,
-			"shellArgs" => self.shell_args,
-			"shellPath" => self.shell_path.as_ref().map(|p| p.to_str().unwrap()),
-			"strictEnv" => self.strict_env,
-		});
-		Terminal { hid }
+		Terminal { terminal }
 	}
 }
 
@@ -96,24 +87,26 @@ impl Builder {
 ///
 /// See [module documentation](index.html) for more details.
 pub struct Terminal {
-	hid: u64,
+	terminal: vscode_sys::Terminal,
 }
 
 impl Terminal {
 	/// Create a new builder to configure the terminal.
 	pub fn new() -> Builder {
-		Builder { cwd: None, env: None, name: None, shell_args: None, shell_path: None, strict_env: false }
+		Builder {
+			cwd: None,
+			env: None,
+			name: None,
+			shell_args: None,
+			shell_path: None,
+			strict_env: false,
+		}
 	}
 
 	/// Write a text line to the terminal.
 	/// VS Code will add a newline by itself.
-	pub fn write(&self, text: impl AsRef<str>) {
-		send_object(json::object! {
-			"tag" => "terminal_write",
-			"hid" => self.hid,
-			"text" => text.as_ref(),
-			"addNewLine" => true,
-		});
+	pub fn write(&self, text: &str) {
+		self.terminal.send_text(text, Some(true));
 	}
 
 	/// Make the terminal visible without changing the focus.
@@ -127,10 +120,6 @@ impl Terminal {
 	}
 
 	fn raw_show(&self, preserve_focus: bool) {
-		send_object(json::object! {
-			"tag" => "terminal_show",
-			"hid" => self.hid,
-			"preserveFocus" => preserve_focus,
-		})
+		self.terminal.show(Some(preserve_focus));
 	}
 }

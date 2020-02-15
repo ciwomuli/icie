@@ -1,20 +1,23 @@
 //! Selecting one or some of the given options.
 
-use crate::{internal::executor::send_object, LazyFuture};
+use js_sys::Array;
+use serde::{Deserialize, Serialize};
+use std::iter::{Chain, Empty, Once};
+use wasm_bindgen::JsValue;
 
 /// Builder object for an item that can be selected.
 #[must_use]
-pub struct Item {
+pub struct Item<T> {
 	always_show: bool,
 	description: Option<String>,
 	detail: Option<String>,
 	label: String,
-	id: String,
+	id: T,
 }
-impl Item {
+impl<T> Item<T> {
 	/// Create a new item with the given ID and label.
-	pub fn new(id: impl AsRef<str>, label: impl AsRef<str>) -> Item {
-		Item { always_show: false, description: None, detail: None, label: label.as_ref().to_owned(), id: id.as_ref().to_owned() }
+	pub fn new(id: T, label: String) -> Item<T> {
+		Item { always_show: false, description: None, detail: None, label, id }
 	}
 
 	/// Set to show item regardless of whether what user typed matches the item.
@@ -24,28 +27,28 @@ impl Item {
 	}
 
 	/// Set description, displayed in lighter font beside the label.
-	pub fn description(mut self, x: impl AsRef<str>) -> Self {
-		self.description = Some(x.as_ref().to_owned());
+	pub fn description(mut self, x: String) -> Self {
+		self.description = Some(x);
 		self
 	}
 
 	/// Set detail, displayed in smaller and lighter font below the label.
-	pub fn detail(mut self, x: impl AsRef<str>) -> Self {
-		self.detail = Some(x.as_ref().to_owned());
+	pub fn detail(mut self, x: String) -> Self {
+		self.detail = Some(x);
 		self
 	}
 }
 
 /// Builder for configuring quick picks. Use [`QuickPick::new`] to create.
 #[must_use]
-pub struct Builder {
+pub struct Builder<'a, T, I: Iterator<Item=Item<T>>> {
 	ignore_focus_out: bool,
 	match_on_description: bool,
 	match_on_detail: bool,
-	placeholder: Option<String>,
-	items: Vec<Item>,
+	placeholder: Option<&'a str>,
+	items: I,
 }
-impl Builder {
+impl<'a, T: Serialize+for<'d> Deserialize<'d>, I: Iterator<Item=Item<T>>> Builder<'a, T, I> {
 	/// Do not make the quick pick disappear when user breaks focus.
 	pub fn ignore_focus_out(mut self) -> Self {
 		self.ignore_focus_out = true;
@@ -65,12 +68,13 @@ impl Builder {
 	}
 
 	/// Set a placeholder.
-	pub fn placeholder(mut self, x: impl AsRef<str>) -> Self {
-		self.placeholder = Some(x.as_ref().to_owned());
+	pub fn placeholder(mut self, x: &'a str) -> Self {
+		self.placeholder = Some(x);
 		self
 	}
 
-	/// When user types a filter, match it against the description and the detail as well as the label.
+	/// When user types a filter, match it against the description and the detail as well as the
+	/// label.
 	pub fn match_on_all(mut self) -> Self {
 		self.match_on_description = true;
 		self.match_on_detail = true;
@@ -78,42 +82,62 @@ impl Builder {
 	}
 
 	/// Add an item to the selection.
-	pub fn item(mut self, item: Item) -> Self {
-		self.items.push(item);
-		self
+	pub fn item(self, item: Item<T>) -> Builder<'a, T, Chain<I, Once<Item<T>>>> {
+		Builder {
+			ignore_focus_out: self.ignore_focus_out,
+			match_on_description: self.match_on_description,
+			match_on_detail: self.match_on_detail,
+			placeholder: self.placeholder,
+			items: self.items.chain(std::iter::once(item)),
+		}
 	}
 
 	/// Add items to the selection.
-	pub fn items(mut self, items: impl IntoIterator<Item=Item>) -> Self {
-		for item in items.into_iter() {
-			self = self.item(item);
+	pub fn items<I2: IntoIterator<Item=Item<T>>>(
+		self,
+		items: I2,
+	) -> Builder<'a, T, Chain<I, I2::IntoIter>>
+	{
+		Builder {
+			ignore_focus_out: self.ignore_focus_out,
+			match_on_description: self.match_on_description,
+			match_on_detail: self.match_on_detail,
+			placeholder: self.placeholder,
+			items: self.items.chain(items.into_iter()),
 		}
-		self
 	}
 
 	/// Prepare a lazy future with the quick pick.
 	/// This does not spawn it yet.
-	pub fn build(self) -> LazyFuture<Option<String>> {
-		LazyFuture::new_vscode(
-			move |aid| {
-				send_object(json::object! {
-					"tag" => "quick_pick",
-					"ignoreFocusOut" => self.ignore_focus_out,
-					"matchOnDescription" => self.match_on_description,
-					"matchOnDetail" => self.match_on_detail,
-					"placeholder" => self.placeholder,
-					"items" => self.items.into_iter().map(|item| json::object! {
-						"label" => item.label,
-						"description" => item.description,
-						"detail" => item.detail,
-						"alwaysShow" => item.always_show,
-						"id" => item.id,
-					}).collect::<Vec<_>>(),
-					"aid" => aid,
+	pub async fn show(self) -> Option<T> {
+		let items = Array::new();
+		for item in self.items {
+			items.push(
+				&JsValue::from_serde(&vscode_sys::window::ShowQuickPickItem {
+					detail: item.detail.as_deref(),
+					description: item.description.as_deref(),
+					always_show: item.always_show,
+					label: &item.label,
+					id: item.id,
+					picked: false,
 				})
-			},
-			|raw| raw.as_str().map(String::from),
-		)
+				.unwrap(),
+			);
+		}
+		let options = vscode_sys::window::ShowQuickPickOptions {
+			can_pick_many: false,
+			ignore_focus_out: self.ignore_focus_out,
+			match_on_description: self.match_on_description,
+			match_on_detail: self.match_on_detail,
+			place_holder: self.placeholder,
+		};
+		let item = vscode_sys::window::show_quick_pick(&items, options).await;
+		if !item.is_undefined() {
+			let item: vscode_sys::ItemRet<T> = item.into_serde().unwrap();
+			Some(item.id)
+		} else {
+			None
+		}
 	}
 }
 
@@ -126,7 +150,13 @@ pub struct QuickPick {
 
 impl QuickPick {
 	/// Create a new builder to configure the quick pick.
-	pub fn new() -> Builder {
-		Builder { ignore_focus_out: false, match_on_detail: false, match_on_description: false, placeholder: None, items: Vec::new() }
+	pub fn new<T>() -> Builder<'static, T, Empty<Item<T>>> {
+		Builder {
+			ignore_focus_out: false,
+			match_on_detail: false,
+			match_on_description: false,
+			placeholder: None,
+			items: std::iter::empty(),
+		}
 	}
 }

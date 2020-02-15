@@ -1,3 +1,21 @@
+## 0.7.1
+
+- Added more logging to help diagnose a Codeforces login issue
+
+## 0.7
+
+- Added **Windows and macOS support**
+- Added support for Codeforces training group tasks
+- Added progress bar when scanning for contests
+- Added link to submission details in tracking notification
+- Added extension icon and customized background colors
+- Added displaying package manager name in install suggestions
+- Added support for installing packages with Arch's Pacman
+- Fixed the newsletter to appear less often
+- Fixed errors when dealing with some rare Codeforces verdicts
+- Fixed SIO2 backend not checking if logged in when submitting
+- Fixed telemetry to follow the intended usage patterns
+
 ## 0.6.4
 
 - Added focusing test view when adding new tests with <kbd>Alt</kbd><kbd>-</kbd>
@@ -74,7 +92,7 @@
 This release concludes the month-long rapid development following the 0.5 rewrite. The next planned feature is contest mode, which will take more than a few days - meanwhile, feel free to [ask for other features or bugfixes on GitHub](https://github.com/pustaczek/icie/issues)!
 
 - **Added customizable directory names**, which support using task symbol/title, contest id, site name and random elements, as well as using custom cases like PascalCase or kebab-case. See icie.init.projectNameTemplate configuraiton entry for more details.
-- **Added quickpasting**, which automatically copy-pastes data structures and algorithms to your code after pressing <kbd>Alt</kbd><kbd>[</kbd>. See its [setup docs](https://github.com/pustaczek/icie#quickpasting-setup) to start using it.
+- **Added quickpasting**, which automatically copy-pastes data structures and algorithms to your code after pressing <kbd>Alt</kbd><kbd>[</kbd>. See its [setup docs](https://github.com/pustaczek/icie/blob/master/docs/QUICKPASTE.md) to start using it.
 - Improved README to contain more information
 - Fixed SPOJ login not working at all
 

@@ -1,26 +1,23 @@
 use crate::telemetry::TELEMETRY;
 use evscode::R;
 
-pub fn check() -> R<()> {
-	let last = LAST_ACKNOWLEDGED_VERSION.get().wait()?;
-	if last.as_ref().map(String::as_ref) != Some(LAST_IMPORTANT_UPDATE.version) {
+pub async fn check() -> R<()> {
+	let last = LAST_ACKNOWLEDGED_VERSION.get()?;
+	if last.as_deref() != Some(LAST_IMPORTANT_UPDATE.version) {
 		TELEMETRY.newsletter_show.spark();
-		let choice = evscode::Message::new(format!(
+		let message = format!(
 			"Hey, ICIE {} has some cool new features, like: {}; check them out!",
 			LAST_IMPORTANT_UPDATE.version, LAST_IMPORTANT_UPDATE.features
-		))
-		.item("changelog", "See full changelog", false)
-		.item("ok", "Ok", false)
-		.build()
-		.wait();
-		if let Some(choice) = choice {
-			if choice == "changelog" {
-				TELEMETRY.newsletter_changelog.spark();
-				evscode::open_external("https://github.com/pustaczek/icie/blob/master/CHANGELOG.md").wait()?;
-			} else {
-				TELEMETRY.newsletter_dismiss.spark();
-				LAST_ACKNOWLEDGED_VERSION.set(&LAST_IMPORTANT_UPDATE.version.to_owned());
-			}
+		);
+		let choice = evscode::Message::new(&message).item((), "See changelog", false).show().await;
+		let acknowledge = LAST_IMPORTANT_UPDATE.version.to_owned();
+		LAST_ACKNOWLEDGED_VERSION.set(&acknowledge).await;
+		if choice.is_some() {
+			TELEMETRY.newsletter_changelog.spark();
+			evscode::open_external("https://github.com/pustaczek/icie/blob/master/CHANGELOG.md")
+				.await?;
+		} else {
+			TELEMETRY.newsletter_dismiss.spark();
 		}
 	}
 	Ok(())
@@ -32,7 +29,7 @@ struct Update {
 }
 
 const LAST_IMPORTANT_UPDATE: Update =
-	Update { version: "0.6.2", features: "CodeChef support, reopening statements with Alt+8, shortcuts to contest/task websites" };
+	Update { version: "0.7", features: "Windows and macOS support" };
 
 const LAST_ACKNOWLEDGED_VERSION: evscode::State<String> =
 	evscode::State::new("icie.newsletter.lastAcknowledgedVersion", evscode::state::Scope::Global);

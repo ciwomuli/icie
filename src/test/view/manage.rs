@@ -1,139 +1,150 @@
 use crate::{
-	build::build, ci::{cpp::Codegen, exec::Environment}, dir, discover::manage::add_test, telemetry::TELEMETRY, test::{
-		self, time_limit, view::{render::render, SCROLL_TO_FIRST_FAILED, SKILL_ACTIONS}, TestRun
-	}, util
+	build::{build, Codegen}, debug::{gdb, rr}, dir, executable::Environment, telemetry::TELEMETRY, test::{
+		add_test, run, time_limit, view::{render::render, SCROLL_TO_FIRST_FAILED, SKILL_ACTIONS}, TestRun
+	}, util::{fmt_verb, fs, path::Path}
 };
+use async_trait::async_trait;
 use evscode::{
-	error::ResultExt, goodies::{webview_resultmap::Computation, WebviewHandle}, Webview, WebviewResultmap, E, R
+	error::cancel_on, goodies::webview_collection::{Behaviour, Collection}, stdlib::webview::{Disposer, Listener}, webview::{WebviewMeta, WebviewRef}, Webview, E, R
 };
-use std::{
-	fs, path::{Path, PathBuf}
-};
+use futures::StreamExt;
+use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 
-lazy_static::lazy_static! {
-	pub static ref COLLECTION: WebviewResultmap<TestViewLogic> = WebviewResultmap::new(TestViewLogic);
+lazy_static! {
+	pub static ref COLLECTION: Collection<TestView> = Collection::new(TestView);
 }
 
-pub fn touch_input(webview: &Webview) {
-	webview.post_message(json::object! {
-		"tag" => "new_start",
-	});
-}
+pub struct TestView;
 
-pub struct TestViewLogic;
+#[async_trait(?Send)]
+impl Behaviour for TestView {
+	type K = Option<Path>;
+	type V = Vec<TestRun>;
 
-impl Computation for TestViewLogic {
-	type K = Option<PathBuf>;
-	type V = Report;
-
-	fn compute(&self, source: &Option<PathBuf>) -> R<Report> {
-		Ok(Report { runs: test::run(source)? })
+	fn create_empty(&self, source: Self::K) -> R<WebviewMeta> {
+		let title = fmt_verb("ICIE Test View", &source);
+		Ok(Webview::new("icie.test.view", &title, 2)
+			.enable_scripts()
+			.retain_context_when_hidden()
+			.create())
 	}
 
-	fn create_empty_webview(&self, source: &Option<PathBuf>) -> R<Webview> {
-		let title = util::fmt_verb("ICIE Test View", &source);
-		let webview = evscode::Webview::new("icie.test.view", title, 2).enable_scripts().retain_context_when_hidden().create();
-		Ok(webview)
+	async fn compute(&self, source: Self::K) -> R<Self::V> {
+		run(&source).await
 	}
 
-	fn update(&self, _: &Option<PathBuf>, report: &Report, webview: &Webview) -> R<()> {
-		webview.set_html(render(&report.runs)?);
+	async fn update(&self, _: Self::K, report: &Self::V, webview: WebviewRef) -> R<()> {
+		webview.set_html(&render(&report).await?);
 		webview.reveal(2, true);
-		if *SCROLL_TO_FIRST_FAILED.get() {
-			webview.post_message(json::object! {
-				"tag" => "scroll_to_wa",
-			});
+		if SCROLL_TO_FIRST_FAILED.get() {
+			webview.post_message(Food::ScrollToWA).await;
 		}
 		Ok(())
 	}
 
-	fn manage(&self, source: &Option<PathBuf>, _: &Report, webview: WebviewHandle) -> R<Box<dyn FnOnce() -> R<()>+Send+'static>> {
-		let stream = {
-			let webview = webview.lock().unwrap();
-			webview.listener().spawn().cancel_on(webview.disposer())
-		};
-		let source = source.clone();
-		Ok(Box::new(move || {
-			for note in stream {
-				match note["tag"].as_str() {
-					Some("trigger_rr") => evscode::runtime::spawn({
-						let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
-						let source = source.clone();
-						move || crate::debug::rr(in_path, source)
-					}),
-					Some("trigger_gdb") => evscode::runtime::spawn({
-						let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
-						let source = source.clone();
-						move || crate::debug::gdb(in_path, source)
-					}),
-					Some("new_test") => {
-						evscode::runtime::spawn(move || crate::test::add(note["input"].as_str().unwrap(), note["desired"].as_str().unwrap()))
-					},
-					Some("set_alt") => evscode::runtime::spawn({
-						TELEMETRY.test_alternative_add.spark();
-						let source = source.clone();
-						move || {
-							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
-							let out = note["out"].as_str().unwrap();
-							fs::write(in_path.with_extension("alt.out"), format!("{}\n", out.trim()))
-								.wrap("failed to save alternative out as a file")?;
-							COLLECTION.get_force(source)?;
-							Ok(())
-						}
-					}),
-					Some("del_alt") => evscode::runtime::spawn({
-						TELEMETRY.test_alternative_delete.spark();
-						let source = source.clone();
-						move || {
-							let in_path = PathBuf::from(note["in_path"].as_str().unwrap());
-							fs::remove_file(in_path.with_extension("alt.out")).wrap("failed to remove alternative out file")?;
-							COLLECTION.get_force(source)?;
-							Ok(())
-						}
-					}),
-					Some("edit") => {
-						TELEMETRY.test_edit.spark();
-						evscode::open_editor(Path::new(note["path"].as_str().unwrap())).open().spawn();
-					},
-					Some("action_notice") => evscode::runtime::spawn(|| {
-						SKILL_ACTIONS.add_use();
-						Ok(())
-					}),
-					Some("eval_req") => {
-						let webview = webview.clone();
-						evscode::runtime::spawn(move || {
-							let _status = crate::STATUS.push("Evaluating");
-							let id = note["id"].as_i64().unwrap();
-							let input = note["input"].as_str().unwrap();
-							if let Ok(brut) = dir::brut() {
-								if brut.exists() {
-									TELEMETRY.test_eval.spark();
-									let brut = build(brut, &Codegen::Release, false)?;
-									let run = brut.run(input, &[], &Environment { time_limit: time_limit() })?;
-									if run.success() {
-										add_test(input, &run.stdout)?;
-										let webview = webview.lock().unwrap();
-										webview.post_message(json::object! {
-											"tag" => "eval_resp",
-											"id" => id,
-											"input" => input,
-										});
-									} else {
-										return Err(E::error("brut did not evaluate test successfully"));
-									}
+	async fn manage(
+		&self,
+		source: Self::K,
+		webview: WebviewRef,
+		listener: Listener,
+		disposer: Disposer,
+	) -> R<()>
+	{
+		let mut stream = cancel_on(listener, disposer);
+		while let Some(note) = stream.next().await {
+			let note: Note = note?.into_serde().unwrap();
+			match note {
+				Note::TriggerRR { in_path } => {
+					let source = source.clone();
+					evscode::spawn(rr(in_path, source));
+				},
+				Note::TriggerGDB { in_path } => {
+					let source = source.clone();
+					evscode::spawn(gdb(in_path, source));
+				},
+				Note::NewTest { input, desired } => {
+					evscode::spawn(async move { add_test(&input, &desired).await })
+				},
+				Note::SetAlt { in_path, out } => evscode::spawn(async move {
+					TELEMETRY.test_alternative_add.spark();
+					let in_alt_path = in_path.with_extension("alt.out");
+					fs::write(&in_alt_path, out).await?;
+					COLLECTION.update_all().await?;
+					Ok(())
+				}),
+				Note::DelAlt { in_path } => evscode::spawn(async move {
+					TELEMETRY.test_alternative_delete.spark();
+					let in_alt_path = in_path.with_extension("alt.out");
+					fs::remove_file(&in_alt_path).await?;
+					COLLECTION.update_all().await?;
+					Ok(())
+				}),
+				Note::Edit { path } => {
+					TELEMETRY.test_edit.spark();
+					if !fs::exists(&path).await? {
+						fs::write(&path, "").await?;
+					}
+					evscode::open_editor(&path).open().await?;
+				},
+				Note::ActionNotice => SKILL_ACTIONS.add_use().await,
+				Note::EvalReq { id, input } => {
+					if let Ok(brut) = dir::brut() {
+						if fs::exists(&brut).await? {
+							let webview = webview.clone();
+							evscode::spawn(async move {
+								TELEMETRY.test_eval.spark();
+								let _status = crate::STATUS.push("Evaluating");
+								let brut = build(brut, Codegen::Release, false).await?;
+								let environment =
+									Environment { time_limit: time_limit(), cwd: None };
+								let run = brut.run(&input, &[], &environment).await?;
+								drop(_status);
+								if run.success() {
+									add_test(&input, &run.stdout).await?;
+									webview.post_message(Food::EvalResp { id, input }).await;
+									Ok(())
+								} else {
+									Err(E::error("brut did not evaluate test successfully"))
 								}
-							}
-							Ok(())
-						});
-					},
-					_ => return Err(E::error(format!("invalid webview message `{}`", note.dump()))),
-				}
+							});
+						}
+					}
+				},
 			}
-			Ok(())
-		}))
+		}
+		Ok(())
 	}
 }
 
-pub struct Report {
-	pub runs: Vec<TestRun>,
+#[derive(Deserialize)]
+#[serde(tag = "tag")]
+enum Note {
+	#[serde(rename = "trigger_rr")]
+	TriggerRR { in_path: Path },
+	#[serde(rename = "trigger_gdb")]
+	TriggerGDB { in_path: Path },
+	#[serde(rename = "new_test")]
+	NewTest { input: String, desired: String },
+	#[serde(rename = "set_alt")]
+	SetAlt { in_path: Path, out: String },
+	#[serde(rename = "del_alt")]
+	DelAlt { in_path: Path },
+	#[serde(rename = "edit")]
+	Edit { path: Path },
+	#[serde(rename = "action_notice")]
+	ActionNotice,
+	#[serde(rename = "eval_req")]
+	EvalReq { id: i64, input: String },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "tag")]
+pub enum Food {
+	#[serde(rename = "scroll_to_wa")]
+	ScrollToWA,
+	#[serde(rename = "eval_resp")]
+	EvalResp { id: i64, input: String },
+	#[serde(rename = "new_start")]
+	NewStart,
 }

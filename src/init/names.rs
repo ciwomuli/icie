@@ -1,21 +1,25 @@
 use crate::{
-	dir, init::{PathDialog, ASK_FOR_PATH, PROJECT_NAME_TEMPLATE}, interpolation::Interpolation
+	dir, init::{PathDialog, ASK_FOR_PATH, PROJECT_NAME_TEMPLATE}, interpolation::Interpolation, util::path::Path
 };
 use evscode::R;
-use std::{
-	fmt, path::{Path, PathBuf}, str::FromStr
-};
+use std::{fmt, str::FromStr};
 use unijudge::TaskDetails;
 
-/// Default contest directory name. This key uses special syntax to allow using dynamic content, like contest ids. Variables task.id and task.title are not available in this context. See "Icie Init Project name template" for details.
+/// Default contest directory name. This key uses special syntax to allow using dynamic content,
+/// like contest ids. Variables task.id and task.title are not available in this context. See "Icie
+/// Init Project name template" for details.
 #[evscode::config]
-static CONTEST: evscode::Config<Interpolation<ContestVariable>> = "{contest.title case.kebab}".parse().unwrap();
+static CONTEST: evscode::Config<Interpolation<ContestVariable>> =
+	"{contest.title case.kebab}".parse().unwrap();
 
-/// Default task directory name, when created as a part of a contest. This key uses special syntax to allow using dynamic content, like task titles. Variable contest.title is not available in this context. See "Icie Init Project name template" for details.
+/// Default task directory name, when created as a part of a contest. This key uses special syntax
+/// to allow using dynamic content, like task titles. Variable contest.title is not available in
+/// this context. See "Icie Init Project name template" for details.
 #[evscode::config]
-static CONTEST_TASK: evscode::Config<Interpolation<ContestTaskVariable>> = "{task.symbol case.upper}-{task.name case.kebab}".parse().unwrap();
+static CONTEST_TASK: evscode::Config<Interpolation<ContestTaskVariable>> =
+	"{task.symbol case.upper}-{task.name case.kebab}".parse().unwrap();
 
-pub fn design_task_name(root: &Path, meta: Option<&TaskDetails>) -> R<PathBuf> {
+pub async fn design_task_name(root: &Path, meta: Option<&TaskDetails>) -> R<Path> {
 	let variables = Mapping {
 		task_id: meta.as_ref().map(|meta| meta.id.clone()),
 		task_title: meta.as_ref().map(|meta| meta.title.clone()),
@@ -25,15 +29,19 @@ pub fn design_task_name(root: &Path, meta: Option<&TaskDetails>) -> R<PathBuf> {
 	};
 	let (codename, all_good) = PROJECT_NAME_TEMPLATE.get().interpolate(&variables);
 	let config_strategy = ASK_FOR_PATH.get();
-	let strategy = match (&*config_strategy, all_good) {
-		(_, false) => &PathDialog::InputBox,
+	let strategy = match (config_strategy, all_good) {
+		(_, false) => PathDialog::InputBox,
 		(s, true) => s,
 	};
-	//	strategy.query(&*dir::PROJECT_DIRECTORY.get(), &codename)
-	strategy.query(root, &codename)
+	strategy.query(root, &codename).await
 }
 
-pub fn design_contest_name(contest_id: &str, contest_title: &str, site_short: &'static str) -> R<PathBuf> {
+pub async fn design_contest_name(
+	contest_id: String,
+	contest_title: String,
+	site_short: &'static str,
+) -> R<Path>
+{
 	let variables = Mapping {
 		task_id: None,
 		task_title: None,
@@ -43,17 +51,16 @@ pub fn design_contest_name(contest_id: &str, contest_title: &str, site_short: &'
 	};
 	let (codename, all_good) = CONTEST.get().interpolate(&variables);
 	let config_strategy = ASK_FOR_PATH.get();
-	let strategy = match (&*config_strategy, all_good) {
-		(_, false) => &PathDialog::InputBox,
+	let strategy = match (config_strategy, all_good) {
+		(_, false) => PathDialog::InputBox,
 		(s, true) => s,
 	};
-	strategy.query(&*dir::PROJECT_DIRECTORY.get(), &codename)
+	let directory = dir::PROJECT_DIRECTORY.get();
+	strategy.query(&directory, &codename).await
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Variable {
-	RandomCute,
-	RandomAnimal,
 	TaskId,
 	TaskTitle,
 	ContestId,
@@ -71,7 +78,7 @@ pub struct Mapping {
 
 macro_rules! constrain_variable {
 	($name:ident, $($matching:ident)|*) => {
-		#[derive(PartialEq, Eq)]
+		#[derive(Clone, Debug, PartialEq, Eq)]
 		pub struct $name(Variable);
 		impl crate::interpolation::VariableSet for $name {
 			type Map = Mapping;
@@ -100,17 +107,15 @@ macro_rules! constrain_variable {
 	};
 }
 
-constrain_variable!(TaskVariable, RandomCute | RandomAnimal | TaskId | TaskTitle | ContestId | SiteShort);
-constrain_variable!(ContestVariable, RandomCute | RandomAnimal | ContestId | ContestTitle | SiteShort);
-constrain_variable!(ContestTaskVariable, RandomCute | RandomAnimal | TaskId | TaskTitle | ContestId | SiteShort);
+constrain_variable!(TaskVariable, TaskId | TaskTitle | ContestId | SiteShort);
+constrain_variable!(ContestVariable, ContestId | ContestTitle | SiteShort);
+constrain_variable!(ContestTaskVariable, TaskId | TaskTitle | ContestId | SiteShort);
 
 impl crate::interpolation::VariableSet for Variable {
 	type Map = Mapping;
 
 	fn expand(&self, map: &Self::Map) -> Option<String> {
 		match self {
-			Variable::RandomCute => Some(crate::dir::random_adjective().to_owned()),
-			Variable::RandomAnimal => Some(crate::dir::random_animal().to_owned()),
 			Variable::TaskId => map.task_id.clone(),
 			Variable::TaskTitle => map.task_title.clone(),
 			Variable::ContestId => map.contest_id.clone(),
@@ -125,8 +130,6 @@ impl FromStr for Variable {
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
-			"random.cute" => Ok(Variable::RandomCute),
-			"random.animal" => Ok(Variable::RandomAnimal),
 			"task.symbol" => Ok(Variable::TaskId),
 			"task.name" => Ok(Variable::TaskTitle),
 			"contest.id" => Ok(Variable::ContestId),
@@ -140,8 +143,6 @@ impl FromStr for Variable {
 impl fmt::Display for Variable {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		f.write_str(match self {
-			Variable::RandomCute => "random.cute",
-			Variable::RandomAnimal => "random.animal",
 			Variable::TaskId => "task.symbol",
 			Variable::TaskTitle => "task.name",
 			Variable::ContestId => "contest.id",

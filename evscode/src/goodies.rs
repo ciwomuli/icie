@@ -1,12 +1,9 @@
 //! Set of common utilities that are not present in original VS Code API.
 
-pub mod stacked_status;
-pub mod webview_resultmap;
-pub mod webview_singleton;
+pub mod dev_tools_logger;
+pub mod multistatus;
+pub mod webview_collection;
 
-/// Handle to a webview that exists in some sort of collection and may be used by multiple threads.
-pub type WebviewHandle = std::sync::Arc<std::sync::Mutex<crate::Webview>>;
-
-pub use stacked_status::StackedStatus;
-pub use webview_resultmap::WebviewResultmap;
-pub use webview_singleton::WebviewSingleton;
+pub use dev_tools_logger::DevToolsLogger;
+pub use multistatus::MultiStatus;
+pub use webview_collection::Collection;

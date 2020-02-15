@@ -1,44 +1,63 @@
 //! Rich error typee, supporting cancellation, backtraces, automatic logging and followup actions.
 //!
-//! It should also be used by extensions instead of custom error types, because it supports follow-up actions, cancellations, hiding error details
-//! from the user, backtraces and carrying extended logs. Properly connecting these features to VS Code API is a little bit code-heavy, and keeping
-//! this logic inside Evscode allows to improve error message format across all extensions.
+//! It should also be used by extensions instead of custom error types, because it supports
+//! follow-up actions, cancellations, hiding error details from the user, backtraces and carrying
+//! extended logs. Properly connecting these features to VS Code API is a little bit code-heavy, and
+//! keeping this logic inside Evscode allows to improve error message format across all extensions.
 
-use backtrace::Backtrace;
-use std::ops::Try;
+use futures::{
+	stream::{once, select}, Stream, StreamExt
+};
+use std::{fmt, future::Future, ops::Try, pin::Pin};
 
 /// Result type used for errors in Evscode. See [`E`] for details.
 pub type R<T> = Result<T, E>;
 
 /// A button on an error message that the user can press.
-#[derive(Clone, Debug)]
 pub struct Action {
 	/// Title displayed to the user.
 	/// Preferably one-word, because wider buttons look weird.
 	pub title: String,
 	/// The function that will be launched upon clicking the button.
 	/// It will be called in a separate thread.
-	pub trigger: fn() -> R<()>,
+	pub trigger: Pin<Box<dyn Future<Output=R<()>>>>,
 }
 
 /// Indication of how serious the error is.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Severity {
 	/// Abort the operation, display an error message, provide a link to GitHub issues.
 	Error,
 	/// Abort the operation, do not display an error message or provide a link to GitHub issues.
 	Cancel,
-	/// Do not abort the operation, display a warning message, but do provide a link to GitHub issues.
-	/// Do not use the `?` operator to avoid aborting the operation.
+	/// Do not abort the operation, display a warning message, but do provide a link to GitHub
+	/// issues. Do not use the `?` operator to avoid aborting the operation.
 	Warning,
 	/// Abort the operation, display an error message, do not provide a link to GitHub issues.
 	Workflow,
 }
 
+#[derive(Debug)]
+/// A captured WASM backtrace.
+pub struct Backtrace(pub js_sys::Error);
+
+impl Backtrace {
+	/// Capture a backtrace in WASM.
+	pub fn new() -> Backtrace {
+		Backtrace(js_sys::Error::new(""))
+	}
+}
+
+impl Default for Backtrace {
+	fn default() -> Backtrace {
+		Backtrace::new()
+	}
+}
+
 /// Error type used by Evscode.
 ///
 /// See [module documentation](index.html) for details.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct E {
 	/// Marks whose fault this error is and how serious is it.
 	pub severity: Severity,
@@ -69,18 +88,21 @@ impl E {
 		}
 	}
 
-	/// Create an error representing an operation cancelled by user. This error will be logged, but not displayed to the user.
+	/// Create an error representing an operation cancelled by user. This error will be logged, but
+	/// not displayed to the user.
 	pub fn cancel() -> E {
 		E::from(Cancellation)
 	}
 
-	/// Convert an error implementing [`std::error::Error`] to an Evscode error. Error messages will be collected from [`std::fmt::Display`]
-	/// implementations on each error in the [`std::error::Error::source`] chain.
+	/// Convert an error implementing [`std::error::Error`] to an Evscode error. Error messages will
+	/// be collected from [`std::fmt::Display`] implementations on each error in the
+	/// [`std::error::Error::source`] chain.
 	pub fn from_std(native: impl std::error::Error) -> E {
 		E::from_std_ref(&native)
 	}
 
-	/// Convert an error reference implementing [`std::error::Error`] to an Evscode error. See [`E::from_std`] method for details.
+	/// Convert an error reference implementing [`std::error::Error`] to an Evscode error. See
+	/// [`E::from_std`] method for details.
 	pub fn from_std_ref<E2: std::error::Error+?Sized>(native: &E2) -> E {
 		let mut e = E {
 			severity: Severity::Error,
@@ -115,20 +137,38 @@ impl E {
 		buf
 	}
 
-	/// Add an additional message describing the error, which will be displayed in front of the previous ones.
-	/// ```
+	/// A human-facing representation of the error, but including internal error messages that are
+	/// usually hidden.
+	pub fn human_detailed(&self) -> String {
+		let mut buf = String::new();
+		for (i, reason) in self.reasons.iter().rev().chain(self.details.iter().rev()).enumerate() {
+			buf += reason;
+			if i != self.reasons.len() + self.details.len() - 1 {
+				buf += "; ";
+			}
+		}
+		buf
+	}
+
+	/// Add an additional message describing the error, which will be displayed in front of the
+	/// previous ones. ```
 	/// # use evscode::E;
-	/// let e = E::error("DNS timed out").context("network failure").context("failed to fetch Bitcoin prices");
-	/// assert_eq!(e.human(), "failed to fetch Bitcoin prices; network failure; DNS timed out");
+	/// let e = E::error("DNS timed out")
+	///     .context("network failure")
+	///     .context("failed to fetch Bitcoin prices");
+	/// assert_eq!(
+	///     e.human(),
+	///     "failed to fetch Bitcoin prices; network failure; DNS timed out"
+	///     );
 	/// ```
 	pub fn context(mut self, msg: impl AsRef<str>) -> Self {
 		self.reasons.push(msg.as_ref().to_owned());
 		self
 	}
 
-	/// Add an additional message describing the error and mark all previous message as not meant for the end user.
-	/// This does not remove the lower-level messages, they will still be present in developer tools' logs.
-	/// ```
+	/// Add an additional message describing the error and mark all previous message as not meant
+	/// for the end user. This does not remove the lower-level messages, they will still be present
+	/// in developer tools' logs. ```
 	/// # use evscode::E;
 	/// let e = E::error("entity not found").reform("file kitty.txt not found");
 	/// assert_eq!(e.human(), "file kitty.txt not found");
@@ -140,26 +180,40 @@ impl E {
 		self
 	}
 
-	/// Add a follow-up action that can be taken by the user, who will see the action as a button on the error message.
-	pub fn action(mut self, title: impl AsRef<str>, trigger: fn() -> R<()>) -> Self {
-		self.actions.push(Action { title: title.as_ref().to_owned(), trigger });
+	/// Add a follow-up action that can be taken by the user, who will see the action as a button on
+	/// the error message.
+	pub fn action(
+		mut self,
+		title: impl AsRef<str>,
+		trigger: impl Future<Output=R<()>>+'static,
+	) -> Self
+	{
+		self.actions.push(Action { title: title.as_ref().to_owned(), trigger: Box::pin(trigger) });
 		self
 	}
 
-	/// A convenience function to add a follow-up action if the condition is true. See [`E::action`] for details.
-	pub fn action_if(self, cond: bool, title: impl AsRef<str>, trigger: fn() -> R<()>) -> Self {
+	/// A convenience function to add a follow-up action if the condition is true. See [`E::action`]
+	/// for details.
+	pub fn action_if(
+		self,
+		cond: bool,
+		title: impl AsRef<str>,
+		trigger: impl Future<Output=R<()>>+'static,
+	) -> Self
+	{
 		if cond { self.action(title, trigger) } else { self }
 	}
 
-	/// Add an extended error log, which typically is a multiline string, like a compilation log or a subprocess output.
-	/// The log will be displayed as a seperate message in developer tools.
+	/// Add an extended error log, which typically is a multiline string, like a compilation log or
+	/// a subprocess output. The log will be displayed as a seperate message in developer tools.
 	pub fn extended(mut self, extended: impl AsRef<str>) -> Self {
 		self.extended.push(extended.as_ref().to_owned());
 		self
 	}
 
-	/// Mark the error as something common in extension's workflow, that does not need to be put on project's issue tracker.
-	/// This will remove the "report issue?" suffix, which may irritate users in when the error is common.
+	/// Mark the error as something common in extension's workflow, that does not need to be put on
+	/// project's issue tracker. This will remove the "report issue?" suffix, which may irritate
+	/// users in when the error is common.
 	pub fn workflow_error(mut self) -> Self {
 		self.severity = Severity::Workflow;
 		self
@@ -176,7 +230,61 @@ impl E {
 	/// Prefer to return this value from event handlers instead.
 	/// This is meant to be used e.g. for warnings.
 	pub fn emit(self) {
-		crate::internal::executor::error_show(self)
+		let should_show = match self.severity {
+			Severity::Error => true,
+			Severity::Cancel => false,
+			Severity::Warning => true,
+			Severity::Workflow => true,
+		};
+		if should_show {
+			let mut log_msg = String::new();
+			for reason in &self.reasons {
+				log_msg += &format!("{}\n", reason);
+			}
+			for detail in &self.details {
+				log_msg += &format!("{}\n", detail);
+			}
+			log_msg += &format!(
+				"\nContains {} extended log entries\n\n{:?}",
+				self.extended.len(),
+				self.backtrace
+			);
+			log::error!("{}", log_msg);
+			for extended in &self.extended {
+				log::info!("{}", extended);
+			}
+			let should_suggest_report = match self.severity {
+				Severity::Error => true,
+				Severity::Cancel => false,
+				Severity::Warning => true,
+				Severity::Workflow => false,
+			};
+			let message = format!(
+				"{}{}",
+				self.human(),
+				if should_suggest_report {
+					"; [report issue?](https://github.com/pustaczek/icie/issues)"
+				} else {
+					""
+				}
+			);
+			let items = self.actions.iter().enumerate().map(|(id, action)| {
+				crate::message::Action { id, title: &action.title, is_close_affordance: false }
+			});
+			let mut msg = crate::Message::new(&message).error().items(items);
+			if self.severity == Severity::Warning {
+				msg = msg.warning();
+			}
+			let promise = msg.show_eager();
+			crate::spawn(async move {
+				let choice = promise.await;
+				if let Some(choice) = choice {
+					let action = self.actions.into_iter().nth(choice).unwrap();
+					action.trigger.await?;
+				}
+				Ok(())
+			});
+		}
 	}
 }
 
@@ -207,8 +315,22 @@ pub struct Cancellation;
 
 /// Result-like type for operations that could be intentionally cancelled by the user.
 ///
-/// It implements [`std::ops::Try`], which makes it possible to use ? operator in functions returning [`R`].
+/// It implements [`std::ops::Try`], which makes it possible to use ? operator in functions
+/// returning [`R`].
+#[derive(Debug)]
 pub struct Cancellable<T>(pub Option<T>);
+
+/// Return a stream yielding values from this stream, unless the other future yields any value.
+/// In that case the stream will yield a Result-like value representing a cancelled operation, that
+/// can be forwarder using the ? operator.
+pub fn cancel_on<T, A: Stream<Item=T>, B: Future<Output=()>>(
+	a: A,
+	b: B,
+) -> impl Stream<Item=Cancellable<T>>
+{
+	select(a.map(|x| Cancellable(Some(x))), once(b).map(|()| Cancellable(None)))
+}
+
 impl<T> Try for Cancellable<T> {
 	type Error = Cancellation;
 	type Ok = T;
@@ -236,5 +358,23 @@ impl From<Cancellation> for E {
 			backtrace: Backtrace::new(),
 			extended: Vec::new(),
 		}
+	}
+}
+impl From<js_sys::Error> for E {
+	fn from(e: js_sys::Error) -> Self {
+		E {
+			severity: Severity::Error,
+			reasons: vec![String::from(e.message())],
+			details: Vec::new(),
+			actions: Vec::new(),
+			backtrace: Backtrace(e),
+			extended: Vec::new(),
+		}
+	}
+}
+
+impl fmt::Debug for Action {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		f.debug_struct("Action").field("title", &self.title).finish()
 	}
 }

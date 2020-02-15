@@ -1,19 +1,33 @@
-use crate::{build, telemetry::TELEMETRY, term, util};
-use evscode::{error::ResultExt, E, R};
-use std::{
-	fs::File, path::PathBuf, process::{Command, Stdio}
+use crate::{
+	build, executable::{Environment, Executable}, service::Service, telemetry::TELEMETRY, term, test::time_limit, util, util::{fs, path::Path}
+};
+use evscode::{E, R};
+
+pub const GDB: Service = Service {
+	human_name: "GDB",
+	exec_linuxmac: Some("gdb"),
+	exec_windows: None,
+	package_apt: Some("gdb"),
+	package_brew: Some("gdb"),
+	package_pacman: Some("gdb"),
+	tutorial_url_windows: None,
 };
 
-pub fn gdb(in_path: PathBuf, source: Option<PathBuf>) -> R<()> {
+pub const RR: Service = Service {
+	human_name: "RR",
+	exec_linuxmac: Some("rr"),
+	exec_windows: None,
+	package_apt: Some("rr"),
+	package_brew: None,
+	package_pacman: None,
+	tutorial_url_windows: None,
+};
+
+pub async fn gdb(in_path: Path, source: Option<Path>) -> R<()> {
 	TELEMETRY.debug_gdb.spark();
-	if cfg!(not(unix)) {
-		return Err(E::error("GDB debugging is only supported on Linux"));
-	}
-	if !util::is_installed("gdb")? {
-		return Err(E::error("GDB is not installed").action_if(util::is_installed("apt")?, "🔐 Auto-install", install_gdb));
-	}
-	term::debugger("GDB", &in_path, &[
-		"gdb",
+	let gdb = GDB.find_command().await?;
+	term::debugger("GDB", in_path.as_ref(), &[
+		&gdb,
 		"-q",
 		build::exec_path(source)?.to_str().unwrap(),
 		"-ex",
@@ -21,39 +35,29 @@ pub fn gdb(in_path: PathBuf, source: Option<PathBuf>) -> R<()> {
 	])
 }
 
-pub fn rr(in_path: PathBuf, source: Option<PathBuf>) -> R<()> {
+pub async fn rr(in_path: Path, source: Option<Path>) -> R<()> {
 	TELEMETRY.debug_rr.spark();
-	if cfg!(not(unix)) {
-		return Err(E::error("RR debugging is only supported on Linux"));
+	let rr = RR.find_command().await?;
+	let rr_exec = Executable::new_name(rr.clone());
+	let input = fs::read_to_string(in_path.as_ref()).await?;
+	let exec_path = build::exec_path(source)?;
+	let args = ["record", exec_path.to_str().unwrap()];
+	let environment = Environment { time_limit: time_limit(), cwd: None };
+	let record_out = rr_exec.run(&input, &args, &environment).await?;
+	if record_out.stderr.contains("/proc/sys/kernel/perf_event_paranoid") {
+		return Err(E::error(
+			"RR is not configured properly (this is to be expected), kernel.perf_event_paranoid \
+			 must be <= 1",
+		)
+		.action("🔐 Auto-configure", configure_kernel_perf_event_paranoid()));
 	}
-	if !util::is_installed("rr")? {
-		return Err(E::error("RR is not installed").action_if(util::is_installed("apt")?, "🔐 Auto-install", install_rr));
-	}
-	let record_out = Command::new("rr")
-		.arg("record")
-		.arg(build::exec_path(source)?)
-		.stdin(File::open(&in_path).wrap("failed to redirect test input")?)
-		.stdout(Stdio::null())
-		.stderr(Stdio::piped())
-		.output()
-		.wrap("failed to spawn rr record session")?;
-	if std::str::from_utf8(&record_out.stderr).wrap("rr record has written non-utf8 text to stderr")?.contains("/proc/sys/kernel/perf_event_paranoid")
-	{
-		return Err(E::error("RR is not configured properly (this is to be expected), kernel.perf_event_paranoid must be <= 1")
-			.action("🔐 Auto-configure", configure_kernel_perf_event_paranoid));
-	}
-	term::debugger("RR", &in_path, &["rr", "replay", "--", "-q"])
+	term::debugger("RR", in_path.as_ref(), &[&rr, "replay", "--", "-q"])
 }
 
-fn install_gdb() -> R<()> {
-	term::install("GDB", &["pkexec", "apt", "install", "-y", "gdb"])
-}
-fn install_rr() -> R<()> {
-	term::install("RR", &["pkexec", "apt", "install", "-y", "rr"])
-}
-fn configure_kernel_perf_event_paranoid() -> R<()> {
+async fn configure_kernel_perf_event_paranoid() -> R<()> {
 	term::Internal::raw(
 		"ICIE Auto-configure RR",
-		"echo 'kernel.perf_event_paranoid=1' | pkexec tee -a /etc/sysctl.conf && echo 1 | pkexec tee -a /proc/sys/kernel/perf_event_paranoid",
+		"echo 'kernel.perf_event_paranoid=1' | pkexec tee -a /etc/sysctl.conf && echo 1 | pkexec \
+		 tee -a /proc/sys/kernel/perf_event_paranoid",
 	)
 }

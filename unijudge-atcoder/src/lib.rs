@@ -1,9 +1,11 @@
+use async_trait::async_trait;
 use unijudge::{
-	chrono::{FixedOffset, TimeZone}, debris::{self, Context, Document, Find}, reqwest::{
-		self, cookie_store::Cookie, header::{ORIGIN, REFERER}, StatusCode, Url
+	chrono::{FixedOffset, TimeZone}, debris::{self, Context, Document, Find}, http::{Client, Cookie}, reqwest::{
+		header::{ORIGIN, REFERER}, StatusCode, Url
 	}, ContestDetails, Error, Example, Language, RejectionCause, Resource, Result, Submission, TaskDetails, Verdict
 };
 
+#[derive(Debug)]
 pub struct AtCoder;
 
 #[derive(Debug)]
@@ -12,54 +14,71 @@ pub struct Task {
 	task: String,
 }
 
+#[async_trait(?Send)]
 impl unijudge::Backend for AtCoder {
-	type CachedAuth = Cookie<'static>;
+	type CachedAuth = Cookie;
 	type Contest = String;
-	type Session = reqwest::Client;
+	type Session = Client;
 	type Task = Task;
 
 	fn accepted_domains(&self) -> &'static [&'static str] {
 		&["atcoder.jp"]
 	}
 
-	fn deconstruct_resource(&self, _domain: &str, segments: &[&str]) -> Result<Resource<Self::Contest, Self::Task>> {
+	fn deconstruct_resource(
+		&self,
+		_domain: &str,
+		segments: &[&str],
+	) -> Result<Resource<Self::Contest, Self::Task>>
+	{
 		match segments {
 			["contests", contest] => Ok(Resource::Contest((*contest).to_owned())),
 			["contests", contest, "tasks"] => Ok(Resource::Contest((*contest).to_owned())),
-			["contests", contest, "tasks", task] => Ok(Resource::Task(Task { contest: (*contest).to_owned(), task: (*task).to_owned() })),
+			["contests", contest, "tasks", task] => Ok(Resource::Task(Task {
+				contest: (*contest).to_owned(),
+				task: (*task).to_owned(),
+			})),
 			_ => Err(Error::WrongTaskUrl),
 		}
 	}
 
-	fn connect(&self, client: reqwest::Client, _domain: &str) -> Self::Session {
+	fn connect(&self, client: Client, _domain: &str) -> Self::Session {
 		client
 	}
 
-	fn auth_cache(&self, session: &Self::Session) -> Result<Option<Self::CachedAuth>> {
-		let cookies = session.cookies().read().map_err(|_| Error::StateCorruption)?;
-		Ok(cookies.0.get("atcoder.jp", "/", "REVEL_SESSION").map(|c| c.clone().into_owned()))
+	async fn auth_cache(&self, session: &Self::Session) -> Result<Option<Self::CachedAuth>> {
+		Ok(session.cookie_get("REVEL_SESSION")?)
 	}
 
 	fn auth_deserialize(&self, data: &str) -> Result<Self::CachedAuth> {
 		unijudge::deserialize_auth(data)
 	}
 
-	fn auth_login(&self, session: &Self::Session, username: &str, password: &str) -> Result<()> {
-		let csrf = self.fetch_login_csrf(session)?;
+	async fn auth_login(
+		&self,
+		session: &Self::Session,
+		username: &str,
+		password: &str,
+	) -> Result<()>
+	{
+		let csrf = self.fetch_login_csrf(session).await?;
 		let url: Url = "https://atcoder.jp/login".parse()?;
-		let mut resp = match session
+		let resp = match session
 			.post(url)
 			.header(ORIGIN, "https://atcoder.jp")
 			.header(REFERER, "https://atcoder.jp/login")
 			.form(&[("username", username), ("password", password), ("csrf_token", &csrf)])
 			.send()
+			.await
 		{
 			Ok(resp) => resp,
 			// this is the worst way to indicate wrong password I have heard of
-			Err(ref e) if e.to_string().contains("Infinite redirect loop") => return Err(Error::WrongCredentials),
+			Err(ref e) if e.to_string().contains("Infinite redirect loop") => {
+				return Err(Error::WrongCredentials);
+			},
 			Err(e) => return Err(Error::NetworkFailure(e)),
 		};
-		let doc = debris::Document::new(&resp.text()?);
+		let doc = debris::Document::new(&resp.text().await?);
 		if doc.find("#main-container > div.row > div.alert.alert-success").is_ok() {
 			Ok(())
 		} else if doc.find("#main-container > div.row > div.alert.alert-danger").is_ok() {
@@ -69,9 +88,8 @@ impl unijudge::Backend for AtCoder {
 		}
 	}
 
-	fn auth_restore(&self, session: &Self::Session, auth: &Self::CachedAuth) -> Result<()> {
-		let mut cookies = session.cookies().write().map_err(|_| Error::StateCorruption)?;
-		cookies.0.insert(auth.clone(), &"https://atcoder.jp".parse()?).map_err(|_| Error::WrongData)?;
+	async fn auth_restore(&self, session: &Self::Session, auth: &Self::CachedAuth) -> Result<()> {
+		session.cookie_set(auth.clone(), "https://atcoder.jp/")?;
 		Ok(())
 	}
 
@@ -83,14 +101,24 @@ impl unijudge::Backend for AtCoder {
 		Some(task.contest.clone())
 	}
 
-	fn task_details(&self, session: &Self::Session, task: &Self::Task) -> Result<TaskDetails> {
-		let url: Url = format!("https://atcoder.jp/contests/{}/tasks/{}", task.contest, task.task).parse()?;
-		let mut resp = session.get(url.clone()).send()?;
-		let doc = debris::Document::new(&resp.text()?);
-		let (symbol, title) = doc.find("#main-container > .row > div > span.h2")?.text().map(|text| {
-			let mark = text.find('-').ok_or("no dash(-) found in task title")?;
-			std::result::Result::<_, &'static str>::Ok((text[..mark - 1].to_owned(), text[mark + 2..].to_owned()))
-		})?;
+	async fn task_details(
+		&self,
+		session: &Self::Session,
+		task: &Self::Task,
+	) -> Result<TaskDetails>
+	{
+		let url: Url =
+			format!("https://atcoder.jp/contests/{}/tasks/{}", task.contest, task.task).parse()?;
+		let resp = session.get(url.clone()).send().await?;
+		let doc = debris::Document::new(&resp.text().await?);
+		let (symbol, title) =
+			doc.find("#main-container > .row > div > span.h2")?.text().map(|text| {
+				let mark = text.find('-').ok_or("no dash(-) found in task title")?;
+				std::result::Result::<_, &'static str>::Ok((
+					text[..mark - 1].to_owned(),
+					text[mark + 2..].to_owned(),
+				))
+			})?;
 		let parts = doc
 			.find_all("#task-statement > .lang > .lang-en > .part")
 			.filter(|node| {
@@ -108,7 +136,9 @@ impl unijudge::Backend for AtCoder {
 			parts
 				.chunks(2)
 				.map(|pres| match pres {
-					[input, output] => Ok(Example { input: input.to_string(), output: output.to_string() }),
+					[input, output] => {
+						Ok(Example { input: input.to_string(), output: output.to_string() })
+					},
 					_ => Err(doc.error("sample input with no matching output")),
 				})
 				.collect::<debris::Result<_>>()?,
@@ -119,26 +149,46 @@ impl unijudge::Backend for AtCoder {
 				if v.name() == "form" || v.attr("id") == Some("task-statement") {
 					return false;
 				}
-				if v.has_class("lang-en", unijudge::selectors::attr::CaseSensitivity::CaseSensitive) {
+				if v.has_class("lang-en", unijudge::selectors::attr::CaseSensitivity::CaseSensitive)
+				{
 					return true;
 				}
 			}
 			unijudge::statement::any_sibling(v, |u| {
-				if let unijudge::scraper::Node::Element(u) = u.value() { u.attr("id") == Some("task-statement") } else { false }
+				if let unijudge::scraper::Node::Element(u) = u.value() {
+					u.attr("id") == Some("task-statement")
+				} else {
+					false
+				}
 			})
 		});
 		statement.fix_override_csp();
 		statement.fix_traverse(|mut v| {
 			if let unijudge::scraper::Node::Element(v) = v.value() {
-				if v.name() == "link" && v.attr("href").map_or(false, |href| href.contains("contests.css") || href.contains("bootstrap.min.css")) {
+				let is_css = v.name() == "link"
+					&& v.attr("href").map_or(false, |href| {
+						href.contains("contests.css") || href.contains("bootstrap.min.css")
+					});
+				if is_css {
 					unijudge::statement::fix_url(v, unijudge::qn!("href"), "//", "https:");
-					unijudge::statement::fix_url(v, unijudge::qn!("href"), "/", "https://atcoder.jp");
+					unijudge::statement::fix_url(
+						v,
+						unijudge::qn!("href"),
+						"/",
+						"https://atcoder.jp",
+					);
 				}
-				if v.name() == "script" && v.attr("src").map_or(false, |src| src.contains("MathJax.js")) {
+				if v.name() == "script"
+					&& v.attr("src").map_or(false, |src| src.contains("MathJax.js"))
+				{
 					unijudge::statement::fix_url(v, unijudge::qn!("src"), "//", "https:");
 				}
 			}
-			let is_tex = if let unijudge::scraper::Node::Element(v) = v.value() { v.name() == "var" } else { false };
+			let is_tex = if let unijudge::scraper::Node::Element(v) = v.value() {
+				v.name() == "var"
+			} else {
+				false
+			};
 			if is_tex {
 				if let Some(mut u) = v.first_child() {
 					if let unijudge::scraper::Node::Text(text) = u.value() {
@@ -158,13 +208,18 @@ impl unijudge::Backend for AtCoder {
 		})
 	}
 
-	fn task_languages(&self, session: &Self::Session, task: &Self::Task) -> Result<Vec<Language>> {
+	async fn task_languages(
+		&self,
+		session: &Self::Session,
+		task: &Self::Task,
+	) -> Result<Vec<Language>>
+	{
 		let url: Url = format!("https://atcoder.jp/contests/{}/submit", task.contest).parse()?;
-		let mut resp = session.get(url).send()?;
+		let resp = session.get(url).send().await?;
 		if resp.url().path() == "/login" {
 			return Err(Error::AccessDenied);
 		}
-		let doc = debris::Document::new(&resp.text()?);
+		let doc = debris::Document::new(&resp.text().await?);
 		let selection_id = format!("select-lang-{}", task.task);
 		Ok(doc
 			.find_all("#select-lang > div")
@@ -181,10 +236,16 @@ impl unijudge::Backend for AtCoder {
 			.collect::<Result<_>>()?)
 	}
 
-	fn task_submissions(&self, session: &Self::Session, task: &Self::Task) -> Result<Vec<Submission>> {
-		let url: Url = format!("https://atcoder.jp/contests/{}/submissions/me", task.contest).parse()?;
-		let mut resp = session.get(url).send()?;
-		let doc = debris::Document::new(&resp.text()?);
+	async fn task_submissions(
+		&self,
+		session: &Self::Session,
+		task: &Self::Task,
+	) -> Result<Vec<Submission>>
+	{
+		let url: Url =
+			format!("https://atcoder.jp/contests/{}/submissions/me", task.contest).parse()?;
+		let resp = session.get(url).send().await?;
+		let doc = debris::Document::new(&resp.text().await?);
 		Ok(doc
 			.find_all(".panel-submission tbody > tr")
 			.map(|row| {
@@ -193,7 +254,9 @@ impl unijudge::Backend for AtCoder {
 				let status = status.text();
 				let (test_index, verdict) = match status.as_str().find(' ') {
 					Some(i) => (Some(&status.as_str()[..i]), Some(&status.as_str()[i + 1..])),
-					None if status.as_str().starts_with(char::is_numeric) => (Some(status.as_str()), None),
+					None if status.as_str().starts_with(char::is_numeric) => {
+						(Some(status.as_str()), None)
+					},
 					None => (None, Some(status.as_str())),
 				};
 				let verdict = match (verdict, test_index) {
@@ -220,7 +283,12 @@ impl unijudge::Backend for AtCoder {
 						test: None,
 					},
 					(None, None) => {
-						return Err(status.error(format!("unrecognized AtCoder verdict {:?} [{:?} {:?}]", status.as_str(), verdict, test_index)));
+						return Err(status.error(format!(
+							"unrecognized AtCoder verdict {:?} [{:?} {:?}]",
+							status.as_str(),
+							verdict,
+							test_index
+						)));
 					},
 				};
 				Ok(Submission { id, verdict })
@@ -228,8 +296,15 @@ impl unijudge::Backend for AtCoder {
 			.collect::<debris::Result<_>>()?)
 	}
 
-	fn task_submit(&self, session: &Self::Session, task: &Self::Task, language: &Language, code: &str) -> Result<String> {
-		let csrf = self.fetch_login_csrf(session)?;
+	async fn task_submit(
+		&self,
+		session: &Self::Session,
+		task: &Self::Task,
+		language: &Language,
+		code: &str,
+	) -> Result<String>
+	{
+		let csrf = self.fetch_login_csrf(session).await?;
 		let url: Url = format!("https://atcoder.jp/contests/{}/submit", task.contest).parse()?;
 		session
 			.post(url)
@@ -239,12 +314,17 @@ impl unijudge::Backend for AtCoder {
 				("sourceCode", &String::from(code)),
 				("csrf_token", &csrf),
 			])
-			.send()?;
-		Ok(self.task_submissions(session, task)?[0].id.to_string())
+			.send()
+			.await?;
+		Ok(self.task_submissions(session, task).await?[0].id.to_string())
 	}
 
 	fn task_url(&self, _sess: &Self::Session, task: &Self::Task) -> Result<String> {
 		Ok(format!("https://atcoder.jp/contests/{}/tasks/{}", task.contest, task.task))
+	}
+
+	fn submission_url(&self, _sess: &Self::Session, task: &Self::Task, id: &str) -> String {
+		format!("{}/submissions/{}", self.contest_url(&task.contest), id)
 	}
 
 	fn contest_id(&self, contest: &Self::Contest) -> String {
@@ -255,10 +335,19 @@ impl unijudge::Backend for AtCoder {
 		"AtCoder"
 	}
 
-	fn contest_tasks(&self, session: &Self::Session, contest: &Self::Contest) -> Result<Vec<Self::Task>> {
-		let mut resp = session.get(&format!("https://atcoder.jp/contests/{}/tasks", contest)).send()?;
-		let doc = debris::Document::new(&resp.text()?);
-		if resp.status() == StatusCode::NOT_FOUND {
+	async fn contest_tasks(
+		&self,
+		session: &Self::Session,
+		contest: &Self::Contest,
+	) -> Result<Vec<Self::Task>>
+	{
+		let resp = session
+			.get(format!("https://atcoder.jp/contests/{}/tasks", contest).parse()?)
+			.send()
+			.await?;
+		let status = resp.status();
+		let doc = debris::Document::new(&resp.text().await?);
+		if status == StatusCode::NOT_FOUND {
 			let alert = doc.find(".alert.alert-danger")?.text().string();
 			if alert.ends_with("Contest not found.") {
 				return Err(Error::WrongData);
@@ -271,9 +360,13 @@ impl unijudge::Backend for AtCoder {
 		doc.find("table")?
 			.find_all("tbody > tr")
 			.map(|row| {
-				Ok(row.find_nth("td", 1)?.find("a")?.attr("href")?.map(|href| match href.split('/').collect::<Vec<_>>().as_slice() {
-					["", "contests", contest, "tasks", task] => Ok(Task { contest: (*contest).to_owned(), task: (*task).to_owned() }),
-					_ => Err(format!("invalid task url {:?}", href)),
+				Ok(row.find_nth("td", 1)?.find("a")?.attr("href")?.map(|href| {
+					match href.split('/').collect::<Vec<_>>().as_slice() {
+						["", "contests", contest, "tasks", task] => {
+							Ok(Task { contest: (*contest).to_owned(), task: (*task).to_owned() })
+						},
+						_ => Err(format!("invalid task url {:?}", href)),
+					}
 				})?)
 			})
 			.collect()
@@ -283,38 +376,60 @@ impl unijudge::Backend for AtCoder {
 		format!("https://atcoder.jp/contests/{}", contest)
 	}
 
-	fn contest_title(&self, session: &Self::Session, contest: &Self::Contest) -> Result<String> {
+	async fn contest_title(
+		&self,
+		session: &Self::Session,
+		contest: &Self::Contest,
+	) -> Result<String>
+	{
 		let url: Url = self.contest_url(contest).parse()?;
-		let doc = Document::new(&session.get(url).send()?.text()?);
+		let doc = Document::new(&session.get(url).send().await?.text().await?);
 		Ok(doc.find("#main-container > .row > div > div > h1")?.text().string())
 	}
 
-	fn contests(&self, session: &Self::Session) -> Result<Vec<ContestDetails<Self::Contest>>> {
-		let mut resp = session.get("https://atcoder.jp/contests/").send()?;
-		let doc = debris::Document::new(&resp.text()?);
+	async fn contests(
+		&self,
+		session: &Self::Session,
+	) -> Result<Vec<ContestDetails<Self::Contest>>>
+	{
+		let resp = session.get("https://atcoder.jp/contests/".parse()?).send().await?;
+		let doc = debris::Document::new(&resp.text().await?);
 		let container = doc.find("#main-container > .row > div.col-lg-9.col-md-8")?;
 		let headers = container.find_all("h3").map(|h3| h3.text().string()).collect::<Vec<_>>();
-		let table_indices: &[usize] = match headers.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-			["Active Contests", "Permanent Contests", "Upcoming Contests", "Recent Contests"] => &[0, 2],
-			["Active Contests", "Permanent Contests", "Recent Contests"] => &[0],
-			["Permanent Contests", "Upcoming Contests", "Recent Contests"] => &[1],
-			["Permanent Contests", "Recent Contests"] => &[],
-			_ => return Err(Error::from(container.error(format!("unrecognized header layout {:?}", headers)))),
-		};
-		let tables = table_indices.iter().map(|index| container.find_nth("table", *index)).collect::<debris::Result<Vec<_>>>()?;
+		let table_indices: &[usize] =
+			match headers.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+				["Active Contests", "Permanent Contests", "Upcoming Contests", "Recent Contests"] => {
+					&[0, 2]
+				},
+				["Active Contests", "Permanent Contests", "Recent Contests"] => &[0],
+				["Permanent Contests", "Upcoming Contests", "Recent Contests"] => &[1],
+				["Permanent Contests", "Recent Contests"] => &[],
+				_ => {
+					return Err(Error::from(
+						container.error(format!("unrecognized header layout {:?}", headers)),
+					));
+				},
+			};
+		let tables = table_indices
+			.iter()
+			.map(|index| container.find_nth("table", *index))
+			.collect::<debris::Result<Vec<_>>>()?;
 		tables
 			.iter()
 			.flat_map(|table| {
 				table.find_all("tbody > tr").map(|row| {
-					let id = row
-						.find_nth("td", 1)?
-						.find("a")?
-						.attr("href")?
-						.map(|href| Ok::<_, &'static str>(href[href.rfind('/').ok_or("no '/' in /contests/{}")? + 1..].to_owned()))?;
+					let id = row.find_nth("td", 1)?.find("a")?.attr("href")?.map(|href| {
+						Ok::<_, &'static str>(
+							href[href.rfind('/').ok_or("no '/' in /contests/{}")? + 1..].to_owned(),
+						)
+					})?;
 					let title = row.find_nth("td", 1)?.text().string();
 					let start = row.find_nth("td", 0)?.find("a")?.attr("href")?.map(|href| {
 						let japan_standard_time = FixedOffset::east(9 * 3600);
-						japan_standard_time.datetime_from_str(href, "http://www.timeanddate.com/worldclock/fixedtime.html?iso=%Y%m%dT%H%M&p1=248")
+						japan_standard_time.datetime_from_str(
+								href,
+								"http://www.timeanddate.com/worldclock/fixedtime.html?iso=%Y%m%dT%H%M&p1=248",
+							)
 					})?;
 					Ok(ContestDetails { id, title, start })
 				})
@@ -332,10 +447,10 @@ impl unijudge::Backend for AtCoder {
 }
 
 impl AtCoder {
-	fn fetch_login_csrf(&self, session: &reqwest::Client) -> Result<String> {
+	async fn fetch_login_csrf(&self, session: &Client) -> Result<String> {
 		let url: Url = "https://atcoder.jp/login".parse()?;
-		let mut resp = session.get(url).send()?;
-		let doc = debris::Document::new(&resp.text()?);
+		let resp = session.get(url).send().await?;
+		let doc = debris::Document::new(&resp.text().await?);
 		Ok(doc.find_first("[name=\"csrf_token\"]")?.attr("value")?.string())
 	}
 }
